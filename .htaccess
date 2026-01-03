@@ -1,0 +1,39 @@
+# INFINITYFREE SECURITY BYPASS
+# Disable mod_security for API files
+<IfModule mod_security.c>
+    SecRuleRemoveById 300015
+    SecRuleRemoveById 300016
+    SecRuleRemoveById 300017
+</IfModule>
+
+# Allow PHP files in api/ directory
+<LocationMatch "^/api/.*\.php$">
+    SecRuleRemoveById 300015
+    SecRuleRemoveById 300016
+    SecRuleRemoveById 300017
+</LocationMatch>
+
+# Enable rewrite engine
+RewriteEngine On
+
+# Set the base directory
+RewriteBase /DROPX/dropx-backend/
+
+# If the file exists, serve it directly
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# If the directory exists, serve it directly
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Redirect everything else to index.php
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# CORS headers
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "http://localhost:3000"
+    Header set Access-Control-Allow-Credentials "true"
+    Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
+</IfModule>

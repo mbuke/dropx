@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h1>CORS Test Page</h1>
+    <button onclick="testCORS()">Test CORS</button>
+    <div id="result"></div>
+    
+    <script>
+    async function testCORS() {
+        try {
+            const response = await fetch('/api/auth.php?action=check', {
+                credentials: 'include'
+            });
+            const data = await response.json();
+            document.getElementById('result').innerHTML = 
+                `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            console.log('CORS test successful:', data);
+        } catch (error) {
+            document.getElementById('result').innerHTML = 
+                `Error: ${error.message}`;
+            console.error('CORS test failed:', error);
+        }
+    }
+    </script>
+</body>
+</html>
