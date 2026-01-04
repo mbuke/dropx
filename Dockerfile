@@ -17,4 +17,5 @@ RUN chown -R www-data:www-data /var/www/html
 WORKDIR /var/www/html
 
 # Expose dynamic port for Railway
-CMD ["php", "-S", "0.0.0.0:$PORT", "-t", "."]
+CMD php -S 0.0.0.0:$PORT -t .
+
