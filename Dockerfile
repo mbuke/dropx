@@ -13,9 +13,7 @@ COPY . /var/www/html/
 # Set permissions
 RUN chown -R www-data:www-data /var/www/html
 
-# Set working directory
-WORKDIR /var/www/html
+# Configure Apache to use Railway port dynamically
+RUN sed -i "s/80/${PORT}/g" /etc/apache2/ports.conf /etc/apache2/sites-enabled/000-default.conf
 
-# Expose dynamic port for Railway
-CMD php -S 0.0.0.0:$PORT -t .
-
+# Apache will start automatically; no CMD needed
