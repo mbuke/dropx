@@ -117,34 +117,79 @@ function handlePostRequest() {
 }
 
 /*********************************
- * LOGIN
+ * LOGIN - ACCEPTS EMAIL OR PHONE
  *********************************/
 function loginUser($conn, $data) {
-    $identifier = trim($data['email'] ?? $data['username'] ?? '');
+    $identifier = trim($data['identifier'] ?? '');
     $password = $data['password'] ?? '';
 
     if (!$identifier || !$password) {
-        ResponseHandler::error('Email/Username and password required', 400);
+        ResponseHandler::error('Identifier and password required', 400);
     }
 
-    $stmt = $conn->prepare(
-        "SELECT * FROM users WHERE email = :id OR username = :id"
-    );
-    $stmt->execute([':id' => $identifier]);
+    // Check if identifier is phone number (contains only digits, +, spaces, dashes, parentheses)
+    $isPhone = preg_match('/^[\+\s\-\(\)0-9]+$/', $identifier);
+    
+    if ($isPhone) {
+        // Phone login - clean the phone number
+        $phone = cleanPhoneNumber($identifier);
+        
+        if (!$phone || strlen($phone) < 10) {
+            ResponseHandler::error('Invalid phone number', 400);
+        }
+        
+        // Query with phone number
+        $stmt = $conn->prepare("SELECT * FROM users WHERE phone = :phone");
+        $stmt->execute([':phone' => $phone]);
+    } else {
+        // Email/username login
+        $stmt = $conn->prepare(
+            "SELECT * FROM users WHERE email = :id OR username = :id"
+        );
+        $stmt->execute([':id' => $identifier]);
+    }
+    
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$user || !password_verify($password, $user['password'])) {
+    if (!$user) {
+        ResponseHandler::error('Invalid credentials', 401);
+    }
+    
+    // Verify password
+    if (!password_verify($password, $user['password'])) {
         ResponseHandler::error('Invalid credentials', 401);
     }
 
+    // Set session
     $_SESSION['user_id'] = $user['id'];
     $_SESSION['logged_in'] = true;
 
+    // Remove password from response
     unset($user['password']);
 
     ResponseHandler::success([
         'user' => formatUserData($user)
     ], 'Login successful');
+}
+
+/*********************************
+ * CLEAN PHONE NUMBER
+ *********************************/
+function cleanPhoneNumber($phone) {
+    // Remove all non-digit characters except leading +
+    $phone = trim($phone);
+    
+    // If starts with +, keep it
+    $hasPlus = substr($phone, 0, 1) === '+';
+    
+    // Remove all non-digit characters
+    $digits = preg_replace('/\D/', '', $phone);
+    
+    if ($hasPlus) {
+        return '+' . $digits;
+    }
+    
+    return $digits;
 }
 
 /*********************************
@@ -154,9 +199,10 @@ function registerUser($conn, $data) {
     $username = trim($data['username'] ?? '');
     $email = trim($data['email'] ?? '');
     $password = $data['password'] ?? '';
+    $phone = !empty($data['phone']) ? cleanPhoneNumber($data['phone']) : null;
 
     if (!$username || !$email || !$password) {
-        ResponseHandler::error('All fields required', 400);
+        ResponseHandler::error('Username, email and password required', 400);
     }
 
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -167,34 +213,54 @@ function registerUser($conn, $data) {
         ResponseHandler::error('Password must be at least 6 characters', 400);
     }
 
+    // Check if phone is valid (if provided)
+    if ($phone && strlen($phone) < 10) {
+        ResponseHandler::error('Invalid phone number', 400);
+    }
+
+    // Check for existing user
     $check = $conn->prepare(
         "SELECT id FROM users WHERE email = :email OR username = :username"
+        . ($phone ? " OR phone = :phone" : "")
     );
-    $check->execute([':email' => $email, ':username' => $username]);
+    
+    $params = [':email' => $email, ':username' => $username];
+    if ($phone) {
+        $params[':phone'] = $phone;
+    }
+    
+    $check->execute($params);
 
     if ($check->rowCount()) {
         ResponseHandler::error('User already exists', 409);
     }
 
-    $stmt = $conn->prepare(
-        "INSERT INTO users (
-            username, email, password, full_name,
-            wallet_balance, member_level, member_points,
-            total_orders, rating, verified, join_date,
-            created_at, updated_at
-        ) VALUES (
-            :u, :e, :p, :f, 0, 'Silver', 100, 0, 5, 0,
-            :jd, NOW(), NOW()
-        )"
-    );
-
-    $stmt->execute([
+    // Prepare SQL with phone field
+    $sqlFields = "username, email, password";
+    $sqlValues = ":u, :e, :p";
+    $params = [
         ':u' => $username,
         ':e' => $email,
-        ':p' => password_hash($password, PASSWORD_DEFAULT),
-        ':f' => $username,
-        ':jd' => date('F j, Y')
-    ]);
+        ':p' => password_hash($password, PASSWORD_DEFAULT)
+    ];
+    
+    if ($phone) {
+        $sqlFields .= ", phone";
+        $sqlValues .= ", :phone";
+        $params[':phone'] = $phone;
+    }
+    
+    $sqlFields .= ", full_name, wallet_balance, member_level, member_points, total_orders, rating, verified, join_date, created_at, updated_at";
+    $sqlValues .= ", :f, 0, 'Silver', 100, 0, 5, 0, :jd, NOW(), NOW()";
+    
+    $params[':f'] = $username;
+    $params[':jd'] = date('F j, Y');
+
+    $stmt = $conn->prepare(
+        "INSERT INTO users ($sqlFields) VALUES ($sqlValues)"
+    );
+
+    $stmt->execute($params);
 
     $_SESSION['user_id'] = $conn->lastInsertId();
     $_SESSION['logged_in'] = true;
@@ -213,15 +279,61 @@ function updateProfile($conn, $data) {
     $fields = [];
     $params = [':id' => $_SESSION['user_id']];
 
-    foreach (['full_name', 'email', 'phone', 'address', 'avatar'] as $field) {
-        if (!empty($data[$field])) {
+    $allowedFields = ['full_name', 'email', 'phone', 'address', 'avatar'];
+    
+    foreach ($allowedFields as $field) {
+        if (isset($data[$field]) && $data[$field] !== '') {
+            $value = trim($data[$field]);
+            
+            // Special handling for phone
+            if ($field === 'phone') {
+                $value = cleanPhoneNumber($value);
+                if ($value && strlen($value) < 10) {
+                    ResponseHandler::error('Invalid phone number', 400);
+                }
+            }
+            
+            // Special handling for email
+            if ($field === 'email' && !filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                ResponseHandler::error('Invalid email format', 400);
+            }
+            
             $fields[] = "$field = :$field";
-            $params[":$field"] = trim($data[$field]);
+            $params[":$field"] = $value;
         }
     }
 
     if (!$fields) {
         ResponseHandler::error('Nothing to update', 400);
+    }
+
+    // Check if new email or phone already exists
+    if (isset($params[':email']) || isset($params[':phone'])) {
+        $checkSql = "SELECT id FROM users WHERE (";
+        $checkParams = [];
+        
+        if (isset($params[':email'])) {
+            $checkSql .= "email = :email";
+            $checkParams[':email'] = $params[':email'];
+        }
+        
+        if (isset($params[':phone'])) {
+            if (isset($params[':email'])) {
+                $checkSql .= " OR ";
+            }
+            $checkSql .= "phone = :phone";
+            $checkParams[':phone'] = $params[':phone'];
+        }
+        
+        $checkSql .= ") AND id != :id";
+        $checkParams[':id'] = $params[':id'];
+        
+        $check = $conn->prepare($checkSql);
+        $check->execute($checkParams);
+        
+        if ($check->rowCount()) {
+            ResponseHandler::error('Email or phone already in use', 409);
+        }
     }
 
     $fields[] = "updated_at = NOW()";
@@ -278,9 +390,9 @@ function formatUserData($u) {
         'id' => $u['id'],
         'username' => $u['username'],
         'email' => $u['email'],
+        'phone' => $u['phone'] ?? '',
         'name' => $u['full_name'] ?: $u['username'],
         'full_name' => $u['full_name'] ?: $u['username'],
-        'phone' => $u['phone'] ?? '',
         'address' => $u['address'] ?? '',
         'avatar' => $u['avatar'] ?? null,
         'wallet_balance' => (float) ($u['wallet_balance'] ?? 0),
