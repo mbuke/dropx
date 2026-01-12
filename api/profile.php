@@ -10,7 +10,7 @@ header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: https://dropx-frontend-seven.vercel.app');
 header('Access-Control-Allow-Credentials: true');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-CSRF-Token');
 
 // Handle OPTIONS preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -78,6 +78,7 @@ try {
     
 } catch (Exception $e) {
     ob_end_clean();
+    error_log("Profile API Error: " . $e->getMessage());
     jsonResponse(false, 'Server error: ' . $e->getMessage(), [], 500);
 }
 
@@ -102,10 +103,8 @@ function handleGetRequest($user_id, $conn) {
 
 // ============ POST REQUESTS ============
 function handlePostRequest($user_id, $conn) {
-    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
-    
-    // Check if it's form data (for file upload)
-    if (strpos($contentType, 'multipart/form-data') !== false) {
+    // Check if it's multipart/form-data for file upload
+    if (isset($_SERVER['CONTENT_TYPE']) && strpos($_SERVER['CONTENT_TYPE'], 'multipart/form-data') !== false) {
         $data = $_POST;
         $files = $_FILES;
         $action = $data['action'] ?? '';
@@ -181,12 +180,20 @@ function handleDeleteRequest($user_id, $conn) {
 
 function getUserProfile($user_id, $conn) {
     try {
-        // Get user data
+        // Get user data with COALESCE for null values
         $stmt = $conn->prepare("
             SELECT 
-                id, email, full_name, phone, avatar,
-                wallet_balance, member_level, member_points,
-                total_orders, rating, verified,
+                id, 
+                COALESCE(email, '') as email, 
+                COALESCE(full_name, '') as full_name, 
+                COALESCE(phone, '') as phone, 
+                COALESCE(avatar, '') as avatar,
+                COALESCE(wallet_balance, 0) as wallet_balance,
+                COALESCE(member_level, 'Standard') as member_level,
+                COALESCE(member_points, 0) as member_points,
+                COALESCE(total_orders, 0) as total_orders,
+                COALESCE(rating, 0) as rating,
+                COALESCE(verified, 0) as verified,
                 DATE_FORMAT(created_at, '%Y-%m-%d') as join_date
             FROM users 
             WHERE id = ?
@@ -220,9 +227,12 @@ function getUserProfile($user_id, $conn) {
         // Get recent orders
         $ordersStmt = $conn->prepare("
             SELECT 
-                o.id, o.order_number, o.total_amount, o.status, 
+                o.id, 
+                COALESCE(o.order_number, CONCAT('ORD', LPAD(o.id, 6, '0'))) as order_number, 
+                COALESCE(o.total_amount, 0) as total_amount, 
+                COALESCE(o.status, 'pending') as status, 
                 DATE_FORMAT(o.created_at, '%Y-%m-%d') as formatted_date,
-                r.name as restaurant_name,
+                COALESCE(r.name, 'Restaurant') as restaurant_name,
                 (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
             FROM orders o
             LEFT JOIN restaurants r ON o.restaurant_id = r.id
@@ -240,12 +250,18 @@ function getUserProfile($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
+        error_log("Get user profile error: " . $e->getMessage());
         throw new Exception('Failed to get profile: ' . $e->getMessage());
     }
 }
 
 function updateProfile($user_id, $data, $files, $conn) {
     try {
+        // Log received data for debugging
+        error_log("Update profile request for user $user_id");
+        error_log("POST data: " . print_r($data, true));
+        error_log("FILES data: " . print_r($files, true));
+        
         // Validate required fields
         if (empty($data['full_name'])) {
             jsonResponse(false, 'Full name is required', [], 400);
@@ -261,7 +277,7 @@ function updateProfile($user_id, $data, $files, $conn) {
         
         // Check if email exists for another user
         $checkStmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND id != ?");
-        $checkStmt->execute([$data['email'], $user_id]);
+        $checkStmt->execute([trim($data['email']), $user_id]);
         if ($checkStmt->fetch()) {
             jsonResponse(false, 'Email already in use by another account', [], 400);
         }
@@ -273,6 +289,7 @@ function updateProfile($user_id, $data, $files, $conn) {
             $avatar_url = null;
             if (isset($files['avatar']) && $files['avatar']['error'] === UPLOAD_ERR_OK) {
                 $avatar_url = uploadAvatar($user_id, $files['avatar']);
+                error_log("Avatar uploaded to: $avatar_url");
             }
             
             // Build update query
@@ -304,16 +321,26 @@ function updateProfile($user_id, $data, $files, $conn) {
             $stmt = $conn->prepare($sql);
             $stmt->execute($params);
             
+            $affectedRows = $stmt->rowCount();
+            error_log("Database update affected rows: $affectedRows");
+            
             // Update address if provided
             if (isset($data['address']) && !empty(trim($data['address']))) {
                 updateUserAddress($user_id, trim($data['address']), $conn);
             }
             
-            // Get updated user
+            // Get updated user data with COALESCE
             $userStmt = $conn->prepare("
                 SELECT 
-                    id, email, full_name, phone, avatar,
-                    wallet_balance, total_orders, rating, verified,
+                    id, 
+                    COALESCE(email, '') as email, 
+                    COALESCE(full_name, '') as full_name, 
+                    COALESCE(phone, '') as phone, 
+                    COALESCE(avatar, '') as avatar,
+                    COALESCE(wallet_balance, 0) as wallet_balance,
+                    COALESCE(total_orders, 0) as total_orders,
+                    COALESCE(rating, 0) as rating,
+                    COALESCE(verified, 0) as verified,
                     DATE_FORMAT(created_at, '%Y-%m-%d') as join_date
                 FROM users 
                 WHERE id = ?
@@ -342,6 +369,8 @@ function updateProfile($user_id, $data, $files, $conn) {
             
             $conn->commit();
             
+            error_log("Profile update successful for user $user_id");
+            
             ob_end_clean();
             jsonResponse(true, 'Profile updated successfully', [
                 'user' => $updated_user
@@ -349,17 +378,19 @@ function updateProfile($user_id, $data, $files, $conn) {
             
         } catch (Exception $e) {
             $conn->rollBack();
+            error_log("Transaction rollback: " . $e->getMessage());
             throw $e;
         }
         
     } catch (Exception $e) {
+        error_log("Profile update failed: " . $e->getMessage());
         throw new Exception('Profile update failed: ' . $e->getMessage());
     }
 }
 
 function uploadAvatar($user_id, $file) {
     // Validate file
-    $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg'];
     $max_size = 5 * 1024 * 1024; // 5MB
     
     if (!in_array($file['type'], $allowed_types)) {
@@ -370,22 +401,25 @@ function uploadAvatar($user_id, $file) {
         throw new Exception('File size exceeds 5MB limit');
     }
     
-    // Create upload directory
+    // Create upload directory - use absolute path
     $upload_dir = __DIR__ . '/../../uploads/avatars/';
     if (!file_exists($upload_dir)) {
-        mkdir($upload_dir, 0777, true);
+        if (!mkdir($upload_dir, 0755, true)) {
+            throw new Exception('Failed to create upload directory');
+        }
     }
     
-    // Generate filename
-    $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+    // Generate unique filename
+    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
     $filename = 'avatar_' . $user_id . '_' . time() . '.' . $ext;
     $filepath = $upload_dir . $filename;
     
     // Move uploaded file
     if (!move_uploaded_file($file['tmp_name'], $filepath)) {
-        throw new Exception('Failed to upload file');
+        throw new Exception('Failed to upload file. Check directory permissions.');
     }
     
+    // Return relative URL for frontend access
     return '/uploads/avatars/' . $filename;
 }
 
@@ -418,7 +452,8 @@ function updateUserAddress($user_id, $address, $conn) {
             $insertStmt->execute([$user_id, $address]);
         }
     } catch (Exception $e) {
-        // Address update is not critical, continue
+        // Address update is not critical, log and continue
+        error_log("Address update failed: " . $e->getMessage());
     }
 }
 
@@ -426,9 +461,16 @@ function getUserAddresses($user_id, $conn) {
     try {
         $stmt = $conn->prepare("
             SELECT 
-                id, title, address, city, state, zip_code,
-                latitude, longitude, is_default, instructions,
-                address_type,
+                id, 
+                COALESCE(title, 'Address') as title, 
+                COALESCE(address, '') as address, 
+                COALESCE(city, '') as city, 
+                COALESCE(state, '') as state, 
+                COALESCE(zip_code, '') as zip_code,
+                latitude, longitude, 
+                COALESCE(is_default, 0) as is_default, 
+                COALESCE(instructions, '') as instructions,
+                COALESCE(address_type, 'home') as address_type,
                 DATE_FORMAT(created_at, '%Y-%m-%d') as created_date
             FROM user_addresses 
             WHERE user_id = ? 
@@ -443,6 +485,7 @@ function getUserAddresses($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
+        error_log("Get addresses error: " . $e->getMessage());
         throw new Exception('Failed to get addresses: ' . $e->getMessage());
     }
 }
@@ -476,7 +519,7 @@ function addAddress($user_id, $data, $conn) {
         
         $state = $data['state'] ?? '';
         $zip_code = $data['zip_code'] ?? '';
-        $address_type = $data['address_type'] ?? 'other';
+        $address_type = $data['address_type'] ?? 'home';
         $instructions = $data['instructions'] ?? '';
         
         $stmt->execute([
@@ -499,6 +542,7 @@ function addAddress($user_id, $data, $conn) {
         ]);
         
     } catch (Exception $e) {
+        error_log("Add address error: " . $e->getMessage());
         throw new Exception('Failed to add address: ' . $e->getMessage());
     }
 }
@@ -540,6 +584,7 @@ function setDefaultAddress($user_id, $data, $conn) {
         }
         
     } catch (Exception $e) {
+        error_log("Set default address error: " . $e->getMessage());
         throw new Exception('Failed to set default address: ' . $e->getMessage());
     }
 }
@@ -611,6 +656,7 @@ function updateAddress($user_id, $data, $conn) {
         jsonResponse(true, 'Address updated successfully');
         
     } catch (Exception $e) {
+        error_log("Update address error: " . $e->getMessage());
         throw new Exception('Failed to update address: ' . $e->getMessage());
     }
 }
@@ -644,6 +690,7 @@ function deleteAddress($user_id, $data, $conn) {
         jsonResponse(true, 'Address deleted successfully');
         
     } catch (Exception $e) {
+        error_log("Delete address error: " . $e->getMessage());
         throw new Exception('Failed to delete address: ' . $e->getMessage());
     }
 }
@@ -660,13 +707,13 @@ function getUserOrders($user_id, $conn) {
         $where = "WHERE o.user_id = ?";
         $params = [$user_id];
         
-        if (!empty($status)) {
+        if (!empty($status) && $status !== 'all') {
             $where .= " AND o.status = ?";
             $params[] = $status;
         }
         
         // Get total count
-        $countSql = "SELECT COUNT(*) as total FROM orders $where";
+        $countSql = "SELECT COUNT(*) as total FROM orders o $where";
         $countStmt = $conn->prepare($countSql);
         $countStmt->execute($params);
         $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
@@ -677,9 +724,12 @@ function getUserOrders($user_id, $conn) {
         
         $sql = "
             SELECT 
-                o.*,
-                r.name as restaurant_name,
-                r.image as restaurant_image,
+                o.id,
+                COALESCE(o.order_number, CONCAT('ORD', LPAD(o.id, 6, '0'))) as order_number,
+                COALESCE(o.total_amount, 0) as total_amount,
+                COALESCE(o.status, 'pending') as status,
+                COALESCE(r.name, 'Restaurant') as restaurant_name,
+                COALESCE(r.image, '') as restaurant_image,
                 DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i') as formatted_date,
                 (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
             FROM orders o
@@ -705,6 +755,7 @@ function getUserOrders($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
+        error_log("Get orders error: " . $e->getMessage());
         throw new Exception('Failed to get orders: ' . $e->getMessage());
     }
 }
@@ -751,6 +802,7 @@ function changePassword($user_id, $data, $conn) {
         jsonResponse(true, 'Password changed successfully');
         
     } catch (Exception $e) {
+        error_log("Change password error: " . $e->getMessage());
         throw new Exception('Failed to change password: ' . $e->getMessage());
     }
 }
