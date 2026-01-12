@@ -1,6 +1,5 @@
 <?php
 // profile.php - COMPLETE PROFILE API
-// Enable CORS and handle preflight
 
 // Start output buffering
 ob_start();
@@ -18,16 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Start session with proper settings
+// Start session
 if (session_status() === PHP_SESSION_NONE) {
-    session_set_cookie_params([
-        'lifetime' => 86400,
-        'path' => '/',
-        'domain' => $_SERVER['HTTP_HOST'],
-        'secure' => true,
-        'httponly' => true,
-        'samesite' => 'None'
-    ]);
     session_start();
 }
 
@@ -78,8 +69,7 @@ try {
     
 } catch (Exception $e) {
     ob_end_clean();
-    error_log("Profile API Error: " . $e->getMessage());
-    jsonResponse(false, 'Server error: ' . $e->getMessage(), [], 500);
+    jsonResponse(false, 'Server error', [], 500);
 }
 
 // ============ GET REQUESTS ============
@@ -252,32 +242,13 @@ function getUserProfile($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
-        error_log("Get user profile error: " . $e->getMessage());
-        throw new Exception('Failed to get profile: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to get profile', [], 500);
     }
 }
 
 function updateProfile($user_id, $data, $files, $conn) {
     try {
-        // Log received data for debugging
-        error_log("=== UPDATE PROFILE DEBUG ===");
-        error_log("User ID: $user_id");
-        error_log("Full Name: " . ($data['full_name'] ?? 'Not provided'));
-        error_log("Email: " . ($data['email'] ?? 'Not provided'));
-        error_log("Phone: " . ($data['phone'] ?? 'Not provided'));
-        error_log("Address: " . ($data['address'] ?? 'Not provided'));
-        
-        if (isset($files['avatar'])) {
-            error_log("Avatar file received:");
-            error_log("  Name: " . $files['avatar']['name']);
-            error_log("  Type: " . $files['avatar']['type']);
-            error_log("  Size: " . $files['avatar']['size']);
-            error_log("  Error: " . $files['avatar']['error']);
-            error_log("  Tmp Name: " . $files['avatar']['tmp_name']);
-        } else {
-            error_log("No avatar file in request");
-        }
-        
         // Validate required fields
         if (empty($data['full_name'])) {
             jsonResponse(false, 'Full name is required', [], 400);
@@ -304,11 +275,7 @@ function updateProfile($user_id, $data, $files, $conn) {
             // Handle avatar upload
             $avatar_url = null;
             if (isset($files['avatar']) && $files['avatar']['error'] === UPLOAD_ERR_OK) {
-                error_log("Starting avatar upload process...");
                 $avatar_url = uploadAvatar($user_id, $files['avatar']);
-                error_log("Avatar uploaded successfully. Path: $avatar_url");
-            } elseif (isset($files['avatar'])) {
-                error_log("Avatar upload error code: " . $files['avatar']['error']);
             }
             
             // Build update query
@@ -329,7 +296,6 @@ function updateProfile($user_id, $data, $files, $conn) {
             if ($avatar_url) {
                 $updateFields[] = "avatar = ?";
                 $params[] = $avatar_url;
-                error_log("Avatar will be saved to database: $avatar_url");
             }
             
             $updateFields[] = "updated_at = CURRENT_TIMESTAMP";
@@ -338,14 +304,8 @@ function updateProfile($user_id, $data, $files, $conn) {
             $sql = "UPDATE users SET " . implode(", ", $updateFields) . " WHERE id = ?";
             $params[] = $user_id;
             
-            error_log("SQL Query: $sql");
-            error_log("Parameters: " . print_r($params, true));
-            
             $stmt = $conn->prepare($sql);
             $stmt->execute($params);
-            
-            $affectedRows = $stmt->rowCount();
-            error_log("Database update affected rows: $affectedRows");
             
             // Update address if provided
             if (isset($data['address']) && !empty(trim($data['address']))) {
@@ -394,9 +354,6 @@ function updateProfile($user_id, $data, $files, $conn) {
             
             $conn->commit();
             
-            error_log("Profile update successful for user $user_id");
-            error_log("Returning user data: " . json_encode($updated_user));
-            
             ob_end_clean();
             jsonResponse(true, 'Profile updated successfully', [
                 'user' => $updated_user
@@ -404,15 +361,13 @@ function updateProfile($user_id, $data, $files, $conn) {
             
         } catch (Exception $e) {
             $conn->rollBack();
-            error_log("Transaction rollback: " . $e->getMessage());
-            error_log("Rollback trace: " . $e->getTraceAsString());
-            throw $e;
+            ob_end_clean();
+            jsonResponse(false, 'Profile update failed', [], 500);
         }
         
     } catch (Exception $e) {
-        error_log("Profile update failed: " . $e->getMessage());
-        error_log("Update trace: " . $e->getTraceAsString());
-        throw new Exception('Profile update failed: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Profile update failed', [], 500);
     }
 }
 
@@ -423,7 +378,7 @@ function uploadAvatar($user_id, $file) {
         $max_size = 5 * 1024 * 1024; // 5MB
         
         if (!in_array($file['type'], $allowed_types)) {
-            throw new Exception('Invalid file type. Allowed: JPEG, PNG, GIF, WebP');
+            throw new Exception('Invalid file type');
         }
         
         if ($file['size'] > $max_size) {
@@ -439,25 +394,11 @@ function uploadAvatar($user_id, $file) {
         // Define upload directory path
         $upload_dir = $root_dir . '/uploads/avatars/';
         
-        error_log("Current dir: $current_dir");
-        error_log("Root dir: $root_dir");
-        error_log("Upload dir: $upload_dir");
-        
         // Create directory if it doesn't exist
         if (!file_exists($upload_dir)) {
-            error_log("Creating upload directory: $upload_dir");
             if (!mkdir($upload_dir, 0755, true)) {
-                throw new Exception('Failed to create upload directory: ' . $upload_dir);
+                throw new Exception('Failed to create upload directory');
             }
-            error_log("Upload directory created successfully");
-        } else {
-            error_log("Upload directory already exists");
-        }
-        
-        // Check if directory is writable
-        if (!is_writable($upload_dir)) {
-            $perms = substr(sprintf('%o', fileperms($upload_dir)), -4);
-            throw new Exception('Upload directory not writable. Permissions: ' . $perms);
         }
         
         // Generate unique filename
@@ -465,35 +406,18 @@ function uploadAvatar($user_id, $file) {
         $filename = 'avatar_' . $user_id . '_' . time() . '.' . $ext;
         $filepath = $upload_dir . $filename;
         
-        error_log("Generated filename: $filename");
-        error_log("Full filepath: $filepath");
-        
-        // Check if tmp file exists
-        if (!file_exists($file['tmp_name'])) {
-            throw new Exception('Temporary file does not exist: ' . $file['tmp_name']);
-        }
-        
         // Move uploaded file
-        error_log("Moving file from " . $file['tmp_name'] . " to " . $filepath);
         if (!move_uploaded_file($file['tmp_name'], $filepath)) {
-            $error = error_get_last();
-            throw new Exception('Failed to move uploaded file. Error: ' . ($error['message'] ?? 'Unknown'));
+            throw new Exception('Failed to upload file');
         }
-        
-        error_log("File moved successfully");
         
         // Set proper permissions
         chmod($filepath, 0644);
         
         // Return relative path for database
-        $relative_path = '/uploads/avatars/' . $filename;
-        error_log("Returning relative path: $relative_path");
-        
-        return $relative_path;
+        return '/uploads/avatars/' . $filename;
         
     } catch (Exception $e) {
-        error_log("Avatar upload error: " . $e->getMessage());
-        error_log("Avatar upload trace: " . $e->getTraceAsString());
         throw $e;
     }
 }
@@ -527,8 +451,7 @@ function updateUserAddress($user_id, $address, $conn) {
             $insertStmt->execute([$user_id, $address]);
         }
     } catch (Exception $e) {
-        // Address update is not critical, log and continue
-        error_log("Address update failed: " . $e->getMessage());
+        // Address update is not critical, continue
     }
 }
 
@@ -553,7 +476,8 @@ function getUserAddresses($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
-        throw new Exception('Failed to get addresses: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to get addresses', [], 500);
     }
 }
 
@@ -609,7 +533,8 @@ function addAddress($user_id, $data, $conn) {
         ]);
         
     } catch (Exception $e) {
-        throw new Exception('Failed to add address: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to add address', [], 500);
     }
 }
 
@@ -646,11 +571,13 @@ function setDefaultAddress($user_id, $data, $conn) {
             
         } catch (Exception $e) {
             $conn->rollBack();
-            throw $e;
+            ob_end_clean();
+            jsonResponse(false, 'Failed to set default address', [], 500);
         }
         
     } catch (Exception $e) {
-        throw new Exception('Failed to set default address: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to set default address', [], 500);
     }
 }
 
@@ -721,7 +648,8 @@ function updateAddress($user_id, $data, $conn) {
         jsonResponse(true, 'Address updated successfully');
         
     } catch (Exception $e) {
-        throw new Exception('Failed to update address: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to update address', [], 500);
     }
 }
 
@@ -754,7 +682,8 @@ function deleteAddress($user_id, $data, $conn) {
         jsonResponse(true, 'Address deleted successfully');
         
     } catch (Exception $e) {
-        throw new Exception('Failed to delete address: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to delete address', [], 500);
     }
 }
 
@@ -815,7 +744,8 @@ function getUserOrders($user_id, $conn) {
         ]);
         
     } catch (Exception $e) {
-        throw new Exception('Failed to get orders: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to get orders', [], 500);
     }
 }
 
@@ -861,7 +791,8 @@ function changePassword($user_id, $data, $conn) {
         jsonResponse(true, 'Password changed successfully');
         
     } catch (Exception $e) {
-        throw new Exception('Failed to change password: ' . $e->getMessage());
+        ob_end_clean();
+        jsonResponse(false, 'Failed to change password', [], 500);
     }
 }
 
