@@ -1,5 +1,5 @@
 <?php
-// profile.php - COMPLETE OPTIMIZED VERSION
+// profile.php - COMPLETE CORRECTED VERSION
 ob_start();
 
 // Enable error reporting for development
@@ -41,7 +41,7 @@ if (session_status() === PHP_SESSION_NONE) {
         'cookie_secure' => true,
         'cookie_httponly' => true,
         'cookie_samesite' => 'None',
-        'read_and_close' => false // Keep session open for multiple operations
+        'read_and_close' => false
     ]);
 }
 
@@ -215,6 +215,11 @@ class ProfileAPI {
         }
     }
 
+    // ============ ADD THE MISSING METHOD ============
+    private function updateProfileWithAvatar($data, $files) {
+        $this->updateProfileData($data, $files);
+    }
+
     // ============ PROFILE FUNCTIONS ============
     private function getUserProfile($light = false) {
         $cacheKey = 'profile_' . $this->user_id . '_' . ($light ? 'light' : 'full');
@@ -249,7 +254,7 @@ class ProfileAPI {
                 $user['avatar'] = $this->getFullAvatarUrl($user['avatar'], 'large');
             } else {
                 // Generate default avatar URL
-                $initials = substr($user['full_name'], 0, 2);
+                $initials = substr($user['full_name'] ?? 'US', 0, 2);
                 $user['avatar'] = "https://ui-avatars.com/api/?name=" . urlencode($initials) . "&background=random&size=400&bold=true&color=fff";
             }
             
@@ -388,6 +393,10 @@ class ProfileAPI {
         
         $this->cache[$cacheKey] = $orders;
         return $orders;
+    }
+
+    private function updateProfile($data) {
+        $this->updateProfileData($data, null);
     }
 
     private function updateProfileData($data, $files = null) {
