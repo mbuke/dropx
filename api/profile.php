@@ -1,33 +1,18 @@
 <?php
-// profile.php - CORRECTED VERSION (Like Wallet API)
-// Remove any whitespace or output before headers
-
-// Start output buffering to prevent any accidental output
 ob_start();
-
-// Enable error reporting for debugging
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
-
-// ============ CORS HEADERS ============
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: https://dropx-frontend-seven.vercel.app');
 header('Access-Control-Allow-Credentials: true');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
-
-// Handle OPTIONS preflight requests
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
-
-// ============ SESSION CONFIGURATION ============
-// Important: Set session cookie parameters BEFORE starting session
 ini_set('session.cookie_samesite', 'None');
 ini_set('session.cookie_secure', true);
-
-// Now start the session
 if (session_status() === PHP_SESSION_NONE) {
     session_start([
         'cookie_lifetime' => 86400,
@@ -43,7 +28,8 @@ function handleError($message, $code = 500) {
     echo json_encode([
         'success' => false,
         'message' => $message,
-        'error' => true
+        'error' => true,
+        'timestamp' => time()
     ]);
     exit;
 }
@@ -63,6 +49,7 @@ class ProfileAPI {
     private $conn;
     private $user_id;
     private $base_url = 'https://dropxbackend-production.up.railway.app';
+    private $cache = [];
 
     public function __construct() {
         try {
@@ -70,10 +57,8 @@ class ProfileAPI {
             $this->conn = $database->getConnection();
             $this->user_id = $_SESSION['user_id'];
             
-            // Validate user exists
-            $stmt = $this->conn->prepare("SELECT id FROM users WHERE id = ?");
-            $stmt->execute([$this->user_id]);
-            if (!$stmt->fetch()) {
+            // Validate user exists with cache
+            if (!$this->validateUser()) {
                 handleError('User not found', 404);
             }
         } catch (Exception $e) {
@@ -81,11 +66,21 @@ class ProfileAPI {
         }
     }
 
+    private function validateUser() {
+        if (isset($this->cache['user_exists'])) {
+            return $this->cache['user_exists'];
+        }
+        
+        $stmt = $this->conn->prepare("SELECT 1 FROM users WHERE id = ? LIMIT 1");
+        $stmt->execute([$this->user_id]);
+        $exists = (bool)$stmt->fetch();
+        $this->cache['user_exists'] = $exists;
+        return $exists;
+    }
+
     public function handleRequest() {
         try {
             $method = $_SERVER['REQUEST_METHOD'];
-            
-            // Handle different content types
             $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
             $isMultipart = strpos($contentType, 'multipart/form-data') !== false;
             
@@ -93,11 +88,9 @@ class ProfileAPI {
                 $action = $_GET['action'] ?? 'get_profile';
                 $this->handleGetRequest($action);
             } else if ($isMultipart) {
-                // Handle form-data (file uploads)
                 $action = $_POST['action'] ?? '';
                 $this->handleMultipartRequest($action);
             } else {
-                // Handle JSON requests
                 $input = file_get_contents('php://input');
                 $data = json_decode($input, true);
                 
@@ -129,7 +122,8 @@ class ProfileAPI {
     private function handleGetRequest($action) {
         switch ($action) {
             case 'get_profile':
-                $this->getUserProfile();
+                $light = isset($_GET['light']) && $_GET['light'] == '1';
+                $this->getUserProfile($light);
                 break;
             case 'addresses':
                 $this->getUserAddresses();
@@ -191,11 +185,19 @@ class ProfileAPI {
         }
     }
 
-    // ============ PROFILE FUNCTIONS ============
+    // ============ OPTIMIZED PROFILE FUNCTIONS ============
 
-    private function getUserProfile() {
+    private function getUserProfile($light = false) {
+        $cacheKey = 'profile_' . $this->user_id . '_' . ($light ? 'light' : 'full');
+        
+        // Check memory cache (short-lived for current request)
+        if (isset($this->cache[$cacheKey])) {
+            echo json_encode($this->cache[$cacheKey]);
+            return;
+        }
+        
         try {
-            // Get user data
+            // Get user data with optimized query
             $query = "SELECT 
                         id, email, full_name, phone, avatar,
                         wallet_balance, member_level, member_points,
@@ -212,70 +214,99 @@ class ProfileAPI {
                 throw new Exception('User not found');
             }
             
-            // Convert avatar path to full URL
+            // Convert avatar path to full URL if exists
             if (!empty($user['avatar'])) {
-                if (!strpos($user['avatar'], 'http') === 0) {
-                    $avatar_path = ltrim($user['avatar'], '/');
-                    $user['avatar'] = $this->base_url . '/' . $avatar_path;
-                }
+                $user['avatar'] = $this->getFullAvatarUrl($user['avatar']);
             }
             
-            // Get default address
-            $addressQuery = "SELECT address, city 
-                            FROM user_addresses 
-                            WHERE user_id = ? AND is_default = 1 
-                            LIMIT 1";
-            $stmt = $this->conn->prepare($addressQuery);
-            $stmt->execute([$this->user_id]);
-            $address = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($address) {
-                $user['address'] = $address['address'];
-                if ($address['city']) {
-                    $user['address'] .= ', ' . $address['city'];
-                }
+            // Get default address (only if not light mode)
+            if (!$light) {
+                $user['address'] = $this->getUserDefaultAddress();
+                
+                // Get recent orders (only if not light mode)
+                $recent_orders = $this->getRecentOrders(5);
+                
+                $response = [
+                    'success' => true,
+                    'message' => 'Profile retrieved successfully',
+                    'data' => [
+                        'user' => $user,
+                        'recent_orders' => $recent_orders
+                    ]
+                ];
             } else {
-                $user['address'] = '';
+                // Light mode response
+                $response = [
+                    'success' => true,
+                    'message' => 'Profile retrieved successfully',
+                    'data' => [
+                        'user' => $user
+                    ]
+                ];
             }
             
-            // Get recent orders
-            $ordersQuery = "SELECT 
-                            o.id, o.order_number, o.total_amount, o.status, 
-                            DATE_FORMAT(o.created_at, '%Y-%m-%d') as formatted_date,
-                            r.name as restaurant_name,
-                            (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
-                          FROM orders o
-                          LEFT JOIN restaurants r ON o.restaurant_id = r.id
-                          WHERE o.user_id = ?
-                          ORDER BY o.created_at DESC 
-                          LIMIT 5";
+            // Cache in memory for current request
+            $this->cache[$cacheKey] = $response;
             
-            $stmt = $this->conn->prepare($ordersQuery);
-            $stmt->execute([$this->user_id]);
-            $recent_orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
-            echo json_encode([
-                'success' => true,
-                'message' => 'Profile retrieved successfully',
-                'data' => [
-                    'user' => $user,
-                    'recent_orders' => $recent_orders
-                ]
-            ]);
+            echo json_encode($response);
             
         } catch (Exception $e) {
             throw new Exception('Failed to get profile: ' . $e->getMessage());
         }
     }
 
-    private function updateProfile($data) {
-        // This handles JSON updates (no file upload)
-        $this->updateProfileData($data, null);
+    private function getFullAvatarUrl($avatarPath) {
+        if (empty($avatarPath)) {
+            return '';
+        }
+        
+        if (strpos($avatarPath, 'http') === 0) {
+            return $avatarPath;
+        }
+        
+        // Remove leading slash if present
+        $cleanPath = ltrim($avatarPath, '/');
+        return $this->base_url . '/' . $cleanPath;
     }
 
-    private function updateProfileWithAvatar($data, $files) {
-        // This handles multipart/form-data with file upload
-        $this->updateProfileData($data, $files);
+    private function getUserDefaultAddress() {
+        $query = "SELECT address, city 
+                 FROM user_addresses 
+                 WHERE user_id = ? AND is_default = 1 
+                 LIMIT 1";
+        $stmt = $this->conn->prepare($query);
+        $stmt->execute([$this->user_id]);
+        $address = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($address) {
+            $fullAddress = $address['address'];
+            if (!empty($address['city'])) {
+                $fullAddress .= ', ' . $address['city'];
+            }
+            return $fullAddress;
+        }
+        
+        return '';
+    }
+
+    private function getRecentOrders($limit = 5) {
+        // Optimized query with JOIN instead of subquery
+        $query = "SELECT 
+                    o.id, o.order_number, o.total_amount, o.status, 
+                    DATE_FORMAT(o.created_at, '%Y-%m-%d') as formatted_date,
+                    r.name as restaurant_name,
+                    COUNT(oi.id) as item_count
+                  FROM orders o
+                  LEFT JOIN restaurants r ON o.restaurant_id = r.id
+                  LEFT JOIN order_items oi ON o.id = oi.order_id
+                  WHERE o.user_id = ?
+                  GROUP BY o.id
+                  ORDER BY o.created_at DESC 
+                  LIMIT ?";
+        
+        $stmt = $this->conn->prepare($query);
+        $stmt->execute([$this->user_id, $limit]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
     private function updateProfileData($data, $files = null) {
@@ -294,7 +325,7 @@ class ProfileAPI {
             }
             
             // Check if email exists for another user
-            $checkQuery = "SELECT id FROM users WHERE email = ? AND id != ?";
+            $checkQuery = "SELECT id FROM users WHERE email = ? AND id != ? LIMIT 1";
             $stmt = $this->conn->prepare($checkQuery);
             $stmt->execute([trim($data['email']), $this->user_id]);
             if ($stmt->fetch()) {
@@ -310,27 +341,33 @@ class ProfileAPI {
                     $avatar_url = $this->uploadAvatar($files['avatar']);
                 }
                 
-                // Build update query
+                // Build update query dynamically
                 $updateFields = [];
                 $params = [];
                 
-                $updateFields[] = "full_name = ?";
-                $params[] = trim($data['full_name']);
-                
-                $updateFields[] = "email = ?";
-                $params[] = trim($data['email']);
+                $fields = [
+                    'full_name' => trim($data['full_name']),
+                    'email' => trim($data['email'])
+                ];
                 
                 if (isset($data['phone'])) {
-                    $updateFields[] = "phone = ?";
-                    $params[] = trim($data['phone']);
+                    $fields['phone'] = trim($data['phone']);
                 }
                 
                 if ($avatar_url) {
-                    $updateFields[] = "avatar = ?";
-                    $params[] = $avatar_url;
+                    $fields['avatar'] = $avatar_url;
                 }
                 
-                $updateFields[] = "updated_at = CURRENT_TIMESTAMP";
+                $fields['updated_at'] = 'CURRENT_TIMESTAMP';
+                
+                foreach ($fields as $field => $value) {
+                    if ($value === 'CURRENT_TIMESTAMP') {
+                        $updateFields[] = "$field = CURRENT_TIMESTAMP";
+                    } else {
+                        $updateFields[] = "$field = ?";
+                        $params[] = $value;
+                    }
+                }
                 
                 // Update user
                 $sql = "UPDATE users SET " . implode(", ", $updateFields) . " WHERE id = ?";
@@ -344,7 +381,7 @@ class ProfileAPI {
                     $this->updateUserAddress(trim($data['address']));
                 }
                 
-                // Get updated user data
+                // Get updated user data (light version for response)
                 $userQuery = "SELECT 
                                 id, email, full_name, phone, avatar,
                                 wallet_balance, total_orders, rating, verified,
@@ -358,31 +395,16 @@ class ProfileAPI {
                 
                 // Convert avatar path to full URL
                 if (!empty($updated_user['avatar'])) {
-                    if (!strpos($updated_user['avatar'], 'http') === 0) {
-                        $avatar_path = ltrim($updated_user['avatar'], '/');
-                        $updated_user['avatar'] = $this->base_url . '/' . $avatar_path;
-                    }
+                    $updated_user['avatar'] = $this->getFullAvatarUrl($updated_user['avatar']);
                 }
                 
                 // Get default address
-                $addrQuery = "SELECT address, city 
-                             FROM user_addresses 
-                             WHERE user_id = ? AND is_default = 1 
-                             LIMIT 1";
-                $stmt = $this->conn->prepare($addrQuery);
-                $stmt->execute([$this->user_id]);
-                $address = $stmt->fetch(PDO::FETCH_ASSOC);
-                
-                if ($address) {
-                    $updated_user['address'] = $address['address'];
-                    if ($address['city']) {
-                        $updated_user['address'] .= ', ' . $address['city'];
-                    }
-                } else {
-                    $updated_user['address'] = '';
-                }
+                $updated_user['address'] = $this->getUserDefaultAddress();
                 
                 $this->conn->commit();
+                
+                // Clear cache
+                $this->clearProfileCache();
                 
                 echo json_encode([
                     'success' => true,
@@ -402,30 +424,35 @@ class ProfileAPI {
         }
     }
 
+    private function clearProfileCache() {
+        // Clear cache entries related to this user
+        $cacheKeys = [
+            'profile_' . $this->user_id . '_light',
+            'profile_' . $this->user_id . '_full'
+        ];
+        
+        foreach ($cacheKeys as $key) {
+            unset($this->cache[$key]);
+        }
+    }
+
     private function uploadAvatar($file) {
         try {
-            // Validate file
             $allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg'];
-            $max_size = 5 * 1024 * 1024; // 5MB
+            $max_size = 5 * 1024 * 1024;
             
             if (!in_array($file['type'], $allowed_types)) {
-                throw new Exception('Invalid file type');
+                throw new Exception('Invalid file type. Allowed: JPG, PNG, GIF, WebP');
             }
             
             if ($file['size'] > $max_size) {
                 throw new Exception('File size exceeds 5MB limit');
             }
             
-            // Get current directory (api/)
             $current_dir = dirname(__FILE__);
-            
-            // Go up one level to project root
             $root_dir = dirname($current_dir);
-            
-            // Define upload directory path
             $upload_dir = $root_dir . '/uploads/avatars/';
             
-            // Create directory if it doesn't exist
             if (!file_exists($upload_dir)) {
                 if (!mkdir($upload_dir, 0755, true)) {
                     throw new Exception('Failed to create upload directory');
@@ -434,7 +461,7 @@ class ProfileAPI {
             
             // Generate unique filename
             $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-            $filename = 'avatar_' . $this->user_id . '_' . time() . '.' . $ext;
+            $filename = 'avatar_' . $this->user_id . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
             $filepath = $upload_dir . $filename;
             
             // Move uploaded file
@@ -442,10 +469,12 @@ class ProfileAPI {
                 throw new Exception('Failed to upload file');
             }
             
-            // Set proper permissions
+            // Optimize image if possible
+            $this->optimizeImage($filepath, $ext);
+            
             chmod($filepath, 0644);
             
-            // Return relative path for database
+            // Return relative path
             return '/uploads/avatars/' . $filename;
             
         } catch (Exception $e) {
@@ -453,9 +482,25 @@ class ProfileAPI {
         }
     }
 
+    private function optimizeImage($filepath, $ext) {
+        // Simple image optimization
+        if ($ext === 'jpeg' || $ext === 'jpg') {
+            $image = imagecreatefromjpeg($filepath);
+            if ($image) {
+                imagejpeg($image, $filepath, 85); // 85% quality
+                imagedestroy($image);
+            }
+        } elseif ($ext === 'png') {
+            $image = imagecreatefrompng($filepath);
+            if ($image) {
+                imagepng($image, $filepath, 8); // 8 = medium compression
+                imagedestroy($image);
+            }
+        }
+    }
+
     private function updateUserAddress($address) {
         try {
-            // Check if user has default address
             $checkQuery = "SELECT id FROM user_addresses 
                           WHERE user_id = ? AND is_default = 1 
                           LIMIT 1";
@@ -464,14 +509,12 @@ class ProfileAPI {
             $result = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($result) {
-                // Update existing
                 $updateQuery = "UPDATE user_addresses 
                                SET address = ?, updated_at = CURRENT_TIMESTAMP 
                                WHERE id = ?";
                 $stmt = $this->conn->prepare($updateQuery);
                 $stmt->execute([$address, $result['id']]);
             } else {
-                // Create new
                 $insertQuery = "INSERT INTO user_addresses 
                                (user_id, title, address, city, address_type, is_default, created_at)
                                VALUES (?, 'Home', ?, '', 'home', 1, CURRENT_TIMESTAMP)";
@@ -479,13 +522,19 @@ class ProfileAPI {
                 $stmt->execute([$this->user_id, $address]);
             }
         } catch (Exception $e) {
-            // Address update is not critical, continue
             error_log('Address update failed: ' . $e->getMessage());
         }
     }
 
     private function getUserAddresses() {
         try {
+            $cacheKey = 'addresses_' . $this->user_id;
+            
+            if (isset($this->cache[$cacheKey])) {
+                echo json_encode($this->cache[$cacheKey]);
+                return;
+            }
+            
             $query = "SELECT 
                         id, title, address, city, state, zip_code,
                         latitude, longitude, is_default, instructions,
@@ -499,13 +548,16 @@ class ProfileAPI {
             $stmt->execute([$this->user_id]);
             $addresses = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            echo json_encode([
+            $response = [
                 'success' => true,
                 'message' => 'Addresses retrieved successfully',
                 'data' => [
                     'addresses' => $addresses
                 ]
-            ]);
+            ];
+            
+            $this->cache[$cacheKey] = $response;
+            echo json_encode($response);
             
         } catch (Exception $e) {
             throw new Exception('Failed to get addresses: ' . $e->getMessage());
@@ -514,7 +566,6 @@ class ProfileAPI {
 
     private function addAddress($data) {
         try {
-            // Validate required fields
             if (empty($data['title']) || empty($data['address']) || empty($data['city'])) {
                 throw new Exception('Title, address, and city are required');
             }
@@ -559,6 +610,9 @@ class ProfileAPI {
             
             $address_id = $this->conn->lastInsertId();
             
+            // Clear addresses cache
+            unset($this->cache['addresses_' . $this->user_id]);
+            
             echo json_encode([
                 'success' => true,
                 'message' => 'Address added successfully',
@@ -581,7 +635,7 @@ class ProfileAPI {
             $address_id = $data['address_id'];
             
             // Verify ownership
-            $checkQuery = "SELECT id FROM user_addresses WHERE id = ? AND user_id = ?";
+            $checkQuery = "SELECT id FROM user_addresses WHERE id = ? AND user_id = ? LIMIT 1";
             $stmt = $this->conn->prepare($checkQuery);
             $stmt->execute([$address_id, $this->user_id]);
             if (!$stmt->fetch()) {
@@ -591,17 +645,18 @@ class ProfileAPI {
             $this->conn->beginTransaction();
             
             try {
-                // Clear all defaults
                 $clearQuery = "UPDATE user_addresses SET is_default = 0 WHERE user_id = ?";
                 $stmt = $this->conn->prepare($clearQuery);
                 $stmt->execute([$this->user_id]);
                 
-                // Set new default
                 $updateQuery = "UPDATE user_addresses SET is_default = 1 WHERE id = ? AND user_id = ?";
                 $stmt = $this->conn->prepare($updateQuery);
                 $stmt->execute([$address_id, $this->user_id]);
                 
                 $this->conn->commit();
+                
+                // Clear cache
+                unset($this->cache['addresses_' . $this->user_id]);
                 
                 echo json_encode([
                     'success' => true,
@@ -627,50 +682,30 @@ class ProfileAPI {
             $address_id = $data['address_id'];
             
             // Verify ownership
-            $checkQuery = "SELECT id FROM user_addresses WHERE id = ? AND user_id = ?";
+            $checkQuery = "SELECT id FROM user_addresses WHERE id = ? AND user_id = ? LIMIT 1";
             $stmt = $this->conn->prepare($checkQuery);
             $stmt->execute([$address_id, $this->user_id]);
             if (!$stmt->fetch()) {
                 throw new Exception('Address not found');
             }
             
-            // Build update
             $updates = [];
             $params = [];
             
-            if (isset($data['title'])) {
-                $updates[] = "title = ?";
-                $params[] = $data['title'];
+            $fields = [
+                'title', 'address', 'city', 'state', 'zip_code', 
+                'address_type', 'instructions'
+            ];
+            
+            foreach ($fields as $field) {
+                if (isset($data[$field])) {
+                    $updates[] = "$field = ?";
+                    $params[] = $data[$field];
+                }
             }
             
-            if (isset($data['address'])) {
-                $updates[] = "address = ?";
-                $params[] = $data['address'];
-            }
-            
-            if (isset($data['city'])) {
-                $updates[] = "city = ?";
-                $params[] = $data['city'];
-            }
-            
-            if (isset($data['state'])) {
-                $updates[] = "state = ?";
-                $params[] = $data['state'];
-            }
-            
-            if (isset($data['zip_code'])) {
-                $updates[] = "zip_code = ?";
-                $params[] = $data['zip_code'];
-            }
-            
-            if (isset($data['address_type'])) {
-                $updates[] = "address_type = ?";
-                $params[] = $data['address_type'];
-            }
-            
-            if (isset($data['instructions'])) {
-                $updates[] = "instructions = ?";
-                $params[] = $data['instructions'];
+            if (empty($updates)) {
+                throw new Exception('No fields to update');
             }
             
             $updates[] = "updated_at = CURRENT_TIMESTAMP";
@@ -681,6 +716,9 @@ class ProfileAPI {
             
             $stmt = $this->conn->prepare($sql);
             $stmt->execute($params);
+            
+            // Clear cache
+            unset($this->cache['addresses_' . $this->user_id]);
             
             echo json_encode([
                 'success' => true,
@@ -701,7 +739,7 @@ class ProfileAPI {
             $address_id = $data['address_id'];
             
             // Check if exists and is default
-            $checkQuery = "SELECT is_default FROM user_addresses WHERE id = ? AND user_id = ?";
+            $checkQuery = "SELECT is_default FROM user_addresses WHERE id = ? AND user_id = ? LIMIT 1";
             $stmt = $this->conn->prepare($checkQuery);
             $stmt->execute([$address_id, $this->user_id]);
             $result = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -714,10 +752,12 @@ class ProfileAPI {
                 throw new Exception('Cannot delete default address');
             }
             
-            // Delete address
             $deleteQuery = "DELETE FROM user_addresses WHERE id = ? AND user_id = ?";
             $stmt = $this->conn->prepare($deleteQuery);
             $stmt->execute([$address_id, $this->user_id]);
+            
+            // Clear cache
+            unset($this->cache['addresses_' . $this->user_id]);
             
             echo json_encode([
                 'success' => true,
@@ -731,6 +771,13 @@ class ProfileAPI {
 
     private function getUserOrders() {
         try {
+            $cacheKey = 'orders_' . $this->user_id . '_' . ($_GET['page'] ?? 1) . '_' . ($_GET['limit'] ?? 10);
+            
+            if (isset($this->cache[$cacheKey])) {
+                echo json_encode($this->cache[$cacheKey]);
+                return;
+            }
+            
             $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
             $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 10;
             $status = $_GET['status'] ?? '';
@@ -752,16 +799,18 @@ class ProfileAPI {
             $countStmt->execute($params);
             $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
             
-            // Get orders
+            // Get orders with optimized query
             $sql = "SELECT 
                     o.*,
                     r.name as restaurant_name,
                     r.image as restaurant_image,
                     DATE_FORMAT(o.created_at, '%Y-%m-%d %H:%i') as formatted_date,
-                    (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as item_count
+                    COUNT(oi.id) as item_count
                   FROM orders o
                   LEFT JOIN restaurants r ON o.restaurant_id = r.id
+                  LEFT JOIN order_items oi ON o.id = oi.order_id
                   $where
+                  GROUP BY o.id
                   ORDER BY o.created_at DESC
                   LIMIT ? OFFSET ?";
             
@@ -772,7 +821,7 @@ class ProfileAPI {
             $stmt->execute($params);
             $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            echo json_encode([
+            $response = [
                 'success' => true,
                 'message' => 'Orders retrieved successfully',
                 'data' => [
@@ -784,7 +833,10 @@ class ProfileAPI {
                         'pages' => ceil($total / $limit)
                     ]
                 ]
-            ]);
+            ];
+            
+            $this->cache[$cacheKey] = $response;
+            echo json_encode($response);
             
         } catch (Exception $e) {
             throw new Exception('Failed to get orders: ' . $e->getMessage());
@@ -809,7 +861,7 @@ class ProfileAPI {
             }
             
             // Get current password hash
-            $query = "SELECT password FROM users WHERE id = ?";
+            $query = "SELECT password FROM users WHERE id = ? LIMIT 1";
             $stmt = $this->conn->prepare($query);
             $stmt->execute([$this->user_id]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -850,6 +902,5 @@ try {
     handleError('Application error: ' . $e->getMessage(), 500);
 }
 
-// Clean output buffer
 ob_end_flush();
 ?>
