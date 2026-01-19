@@ -1,5 +1,5 @@
 <?php
-// api/cart.php - Complete Shopping Cart API
+// api/cart.php - Fixed Shopping Cart API
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: https://dropx-frontend-seven.vercel.app');
 header('Access-Control-Allow-Credentials: true');
@@ -11,6 +11,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
+// Start session only if not already started
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -28,24 +29,40 @@ function jsonResponse($success, $data = null, $message = '', $code = 200) {
     exit();
 }
 
-// Check if user is logged in (for some operations)
-function requireAuth($userId) {
-    if (!$userId) {
-        jsonResponse(false, null, 'Authentication required', 401);
+// Generate session ID if not provided
+function getSessionId() {
+    $sessionId = $_SERVER['HTTP_X_SESSION_ID'] ?? null;
+    
+    if (!$sessionId && isset($_COOKIE['PHPSESSID'])) {
+        $sessionId = $_COOKIE['PHPSESSID'];
     }
-    return $userId;
+    
+    if (!$sessionId) {
+        $sessionId = 'web_' . bin2hex(random_bytes(16));
+    }
+    
+    return $sessionId;
 }
 
 $method = $_SERVER['REQUEST_METHOD'];
 $userId = $_SESSION['user_id'] ?? null;
-$sessionId = $_SERVER['HTTP_X_SESSION_ID'] ?? session_id();
+$sessionId = getSessionId();
+
+// Store session ID for future use
+if (!isset($_SESSION['cart_session_id'])) {
+    $_SESSION['cart_session_id'] = $sessionId;
+}
 
 try {
     $database = new Database();
     $conn = $database->getConnection();
     
+    // For debugging - log request
+    error_log("Cart API Request: Method=$method, SessionID=$sessionId, UserID=" . ($userId ?? 'null'));
+    
     switch ($method) {
         case 'GET':
+            // Get cart with merchant_id from query params
             $merchantId = isset($_GET['merchant_id']) ? intval($_GET['merchant_id']) : null;
             $cart = getCart($conn, $userId, $sessionId, $merchantId);
             jsonResponse(true, $cart, 'Cart retrieved successfully');
@@ -54,7 +71,11 @@ try {
         case 'POST':
             $input = json_decode(file_get_contents('php://input'), true);
             if (!$input) {
-                jsonResponse(false, null, 'Invalid JSON data', 400);
+                $input = $_POST; // Fallback to form data
+            }
+            
+            if (empty($input)) {
+                jsonResponse(false, null, 'No data provided', 400);
             }
             
             $action = $input['action'] ?? 'add';
@@ -68,6 +89,9 @@ try {
                     break;
                 case 'clear':
                     clearCart($conn, $userId, $sessionId, $input);
+                    break;
+                case 'merge':
+                    mergeCart($conn, $userId, $sessionId, $input);
                     break;
                 default:
                     jsonResponse(false, null, 'Invalid action', 400);
@@ -95,7 +119,7 @@ try {
     }
     
 } catch (Exception $e) {
-    error_log("Cart API Error: " . $e->getMessage());
+    error_log("Cart API Error: " . $e->getMessage() . "\n" . $e->getTraceAsString());
     jsonResponse(false, null, 'Server error: ' . $e->getMessage(), 500);
 }
 
@@ -105,7 +129,8 @@ try {
  * Get cart for user/session
  */
 function getCart($conn, $userId, $sessionId, $merchantId = null) {
-    $cartSession = getCartSession($conn, $userId, $sessionId, $merchantId);
+    // Try multiple ways to find cart
+    $cartSession = findCartSession($conn, $userId, $sessionId, $merchantId);
     
     if (!$cartSession) {
         return [
@@ -116,7 +141,9 @@ function getCart($conn, $userId, $sessionId, $merchantId = null) {
                 'deliveryFee' => 0,
                 'taxAmount' => 0,
                 'total' => 0,
-                'itemCount' => 0
+                'itemCount' => 0,
+                'minOrder' => 0,
+                'meetsMinOrder' => true
             ]
         ];
     }
@@ -131,7 +158,8 @@ function getCart($conn, $userId, $sessionId, $merchantId = null) {
             r.name as merchant_name,
             r.delivery_fee,
             r.id as merchant_id,
-            r.min_order_amount
+            r.min_order_amount,
+            r.is_active as restaurant_active
         FROM cart_items ci
         LEFT JOIN menu_items mi ON ci.menu_item_id = mi.id
         LEFT JOIN restaurants r ON mi.restaurant_id = r.id
@@ -155,7 +183,7 @@ function getCart($conn, $userId, $sessionId, $merchantId = null) {
         
         $processedItems[] = [
             'id' => $item['id'],
-            'itemId' => $item['item_uuid'] ?? $item['menu_item_id'],
+            'cartItemId' => $item['id'],
             'menuItemId' => $item['menu_item_id'],
             'name' => $item['item_name'],
             'description' => $item['item_description'],
@@ -176,27 +204,27 @@ function getCart($conn, $userId, $sessionId, $merchantId = null) {
     $deliveryFee = $cartSession['delivery_fee'] ?? ($items[0]['delivery_fee'] ?? 0);
     $taxAmount = $cartSession['tax_amount'] ?? calculateTax($subtotal);
     $total = $subtotal + $deliveryFee + $taxAmount;
-    
-    // Get minimum order amount
     $minOrder = $items[0]['min_order_amount'] ?? 0;
     
     // Update cart session totals
-    $updateQuery = "
-        UPDATE cart_sessions 
-        SET item_count = :item_count,
-            subtotal = :subtotal,
-            total_amount = :total,
-            updated_at = NOW()
-        WHERE id = :session_id
-    ";
-    
-    $updateStmt = $conn->prepare($updateQuery);
-    $updateStmt->execute([
-        ':item_count' => $itemCount,
-        ':subtotal' => $subtotal,
-        ':total' => $total,
-        ':session_id' => $cartSession['id']
-    ]);
+    if ($cartSession['id']) {
+        $updateQuery = "
+            UPDATE cart_sessions 
+            SET item_count = :item_count,
+                subtotal = :subtotal,
+                total_amount = :total,
+                updated_at = NOW()
+            WHERE id = :session_id
+        ";
+        
+        $updateStmt = $conn->prepare($updateQuery);
+        $updateStmt->execute([
+            ':item_count' => $itemCount,
+            ':subtotal' => $subtotal,
+            ':total' => $total,
+            ':session_id' => $cartSession['id']
+        ]);
+    }
     
     return [
         'session' => [
@@ -220,94 +248,145 @@ function getCart($conn, $userId, $sessionId, $merchantId = null) {
 }
 
 /**
- * Get or create cart session
+ * Find cart session using multiple strategies
  */
-function getCartSession($conn, $userId, $sessionId, $merchantId = null) {
-    // Try to find existing active session
+function findCartSession($conn, $userId, $sessionId, $merchantId = null) {
+    // Strategy 1: Find by user ID and merchant
+    if ($userId && $merchantId) {
+        $query = "
+            SELECT * FROM cart_sessions 
+            WHERE user_id = :user_id 
+                AND restaurant_id = :merchant_id
+                AND status = 'active'
+                AND expires_at > NOW()
+            ORDER BY updated_at DESC LIMIT 1
+        ";
+        
+        $stmt = $conn->prepare($query);
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':merchant_id' => $merchantId
+        ]);
+        $session = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($session) {
+            error_log("Found cart by user_id and merchant_id");
+            return $session;
+        }
+    }
+    
+    // Strategy 2: Find by session ID and merchant
+    if ($merchantId) {
+        $query = "
+            SELECT * FROM cart_sessions 
+            WHERE session_id = :session_id 
+                AND restaurant_id = :merchant_id
+                AND status = 'active'
+                AND expires_at > NOW()
+            ORDER BY updated_at DESC LIMIT 1
+        ";
+        
+        $stmt = $conn->prepare($query);
+        $stmt->execute([
+            ':session_id' => $sessionId,
+            ':merchant_id' => $merchantId
+        ]);
+        $session = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($session) {
+            error_log("Found cart by session_id and merchant_id");
+            return $session;
+        }
+    }
+    
+    // Strategy 3: Find any active session for this user/session
     $query = "
         SELECT * FROM cart_sessions 
-        WHERE (uuid = :session_id OR session_id = :session_id OR user_id = :user_id)
+        WHERE (user_id = :user_id OR session_id = :session_id)
             AND status = 'active'
             AND expires_at > NOW()
+        ORDER BY updated_at DESC LIMIT 1
     ";
     
-    $params = [
-        ':session_id' => $sessionId,
-        ':user_id' => $userId
-    ];
-    
-    if ($merchantId) {
-        $query .= " AND restaurant_id = :merchant_id";
-        $params[':merchant_id'] = $merchantId;
-    }
-    
-    $query .= " ORDER BY updated_at DESC LIMIT 1";
-    
     $stmt = $conn->prepare($query);
-    $stmt->execute($params);
-    $cartSession = $stmt->fetch(PDO::FETCH_ASSOC);
+    $stmt->execute([
+        ':user_id' => $userId,
+        ':session_id' => $sessionId
+    ]);
+    $session = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    if ($cartSession) {
-        return $cartSession;
+    if ($session) {
+        error_log("Found cart by user_id or session_id");
+        return $session;
     }
     
-    // Create new session if merchantId is provided
+    // Strategy 4: Create new session if merchant provided
     if ($merchantId) {
-        // Verify merchant exists and is active - FIXED: Use is_active column
-        $merchantQuery = "
-            SELECT id, name, delivery_fee, is_active
-            FROM restaurants 
-            WHERE id = :merchant_id AND (is_active = 1 OR status = 'active')
-        ";
-        $merchantStmt = $conn->prepare($merchantQuery);
-        $merchantStmt->execute([':merchant_id' => $merchantId]);
-        $merchant = $merchantStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$merchant) {
-            error_log("Merchant not found or inactive: $merchantId");
-            return null;
-        }
-        
-        $uuid = bin2hex(random_bytes(16));
-        $expiresAt = date('Y-m-d H:i:s', strtotime('+7 days'));
-        
-        $insertQuery = "
-            INSERT INTO cart_sessions (
-                uuid, user_id, restaurant_id, session_id, 
-                status, expires_at, created_at, updated_at
-            ) VALUES (:uuid, :user_id, :merchant_id, :session_id, 
-                     'active', :expires_at, NOW(), NOW())
-        ";
-        
-        try {
-            $insertStmt = $conn->prepare($insertQuery);
-            $insertStmt->execute([
-                ':uuid' => $uuid,
-                ':user_id' => $userId,
-                ':merchant_id' => $merchantId,
-                ':session_id' => $sessionId,
-                ':expires_at' => $expiresAt
-            ]);
-            
-            $cartSessionId = $conn->lastInsertId();
-            
-            // Get the newly created session
-            $getQuery = "SELECT * FROM cart_sessions WHERE id = :id";
-            $getStmt = $conn->prepare($getQuery);
-            $getStmt->execute([':id' => $cartSessionId]);
-            return $getStmt->fetch(PDO::FETCH_ASSOC);
-            
-        } catch (Exception $e) {
-            error_log("Failed to create cart session: " . $e->getMessage());
-            return null;
-        }
+        return createCartSession($conn, $userId, $sessionId, $merchantId);
     }
     
     return null;
 }
 
 /**
- * Add item to cart - FIXED VERSION
+ * Create new cart session
+ */
+function createCartSession($conn, $userId, $sessionId, $merchantId) {
+    // Verify merchant exists
+    $merchantQuery = "
+        SELECT id, name, delivery_fee, is_active
+        FROM restaurants 
+        WHERE id = :merchant_id AND is_active = 1
+    ";
+    $merchantStmt = $conn->prepare($merchantQuery);
+    $merchantStmt->execute([':merchant_id' => $merchantId]);
+    $merchant = $merchantStmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$merchant) {
+        error_log("Merchant not found or inactive: $merchantId");
+        return null;
+    }
+    
+    $uuid = 'cart_' . bin2hex(random_bytes(8));
+    $expiresAt = date('Y-m-d H:i:s', strtotime('+7 days'));
+    
+    $insertQuery = "
+        INSERT INTO cart_sessions (
+            uuid, user_id, restaurant_id, session_id, 
+            status, expires_at, created_at, updated_at
+        ) VALUES (:uuid, :user_id, :merchant_id, :session_id, 
+                 'active', :expires_at, NOW(), NOW())
+    ";
+    
+    try {
+        $insertStmt = $conn->prepare($insertQuery);
+        $insertStmt->execute([
+            ':uuid' => $uuid,
+            ':user_id' => $userId,
+            ':merchant_id' => $merchantId,
+            ':session_id' => $sessionId,
+            ':expires_at' => $expiresAt
+        ]);
+        
+        $cartSessionId = $conn->lastInsertId();
+        
+        // Get the newly created session
+        $getQuery = "SELECT * FROM cart_sessions WHERE id = :id";
+        $getStmt = $conn->prepare($getQuery);
+        $getStmt->execute([':id' => $cartSessionId]);
+        $session = $getStmt->fetch(PDO::FETCH_ASSOC);
+        
+        error_log("Created new cart session: ID=$cartSessionId, Merchant=$merchantId");
+        return $session;
+        
+    } catch (Exception $e) {
+        error_log("Failed to create cart session: " . $e->getMessage());
+        return null;
+    }
+}
+
+/**
+ * Add item to cart
  */
 function addToCart($conn, $userId, $sessionId, $data) {
     $menuItemId = intval($data['menu_item_id'] ?? 0);
@@ -315,6 +394,8 @@ function addToCart($conn, $userId, $sessionId, $data) {
     $quantity = max(1, intval($data['quantity'] ?? 1));
     $specialInstructions = isset($data['special_instructions']) ? trim($data['special_instructions']) : '';
     $customization = isset($data['customization']) ? $data['customization'] : null;
+    
+    error_log("Add to cart: MenuItem=$menuItemId, Merchant=$merchantId, Qty=$quantity");
     
     if (!$menuItemId || !$merchantId) {
         jsonResponse(false, null, 'Menu item and merchant are required', 400);
@@ -324,86 +405,41 @@ function addToCart($conn, $userId, $sessionId, $data) {
         jsonResponse(false, null, 'Maximum quantity per item is 50', 400);
     }
     
-    // Get menu item details - FIXED QUERY
+    // Get menu item details
     $menuQuery = "
         SELECT 
             mi.*, 
-            r.name as merchant_name, 
-            r.delivery_fee,
             r.id as restaurant_id,
+            r.name as merchant_name,
+            r.delivery_fee,
             r.min_order_amount,
             r.is_active as restaurant_active
         FROM menu_items mi
-        JOIN restaurants r ON mi.restaurant_id = r.id
+        INNER JOIN restaurants r ON mi.restaurant_id = r.id
         WHERE mi.id = :item_id 
             AND mi.is_active = 1 
-            AND (r.is_active = 1 OR r.status = 'active')
+            AND r.id = :merchant_id
+            AND r.is_active = 1
     ";
     
     $menuStmt = $conn->prepare($menuQuery);
-    $menuStmt->execute([':item_id' => $menuItemId]);
+    $menuStmt->execute([
+        ':item_id' => $menuItemId,
+        ':merchant_id' => $merchantId
+    ]);
     $menuItem = $menuStmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$menuItem) {
-        error_log("Menu item not found: ID=$menuItemId, Merchant=$merchantId");
-        
-        // Debug: Check what's wrong
-        $debugQuery = "
-            SELECT 
-                mi.id as menu_id,
-                mi.name as menu_name,
-                mi.restaurant_id as menu_restaurant_id,
-                mi.is_active as menu_active,
-                r.id as restaurant_id,
-                r.name as restaurant_name,
-                r.is_active as restaurant_is_active,
-                r.status as restaurant_status
-            FROM menu_items mi
-            LEFT JOIN restaurants r ON mi.restaurant_id = r.id
-            WHERE mi.id = :item_id
-        ";
-        
-        $debugStmt = $conn->prepare($debugQuery);
-        $debugStmt->execute([':item_id' => $menuItemId]);
-        $debugResult = $debugStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($debugResult) {
-            error_log("Debug result: " . print_r($debugResult, true));
-            $message = "Menu item found but: ";
-            if ($debugResult['menu_active'] != 1) $message .= "Menu item inactive. ";
-            if ($debugResult['restaurant_is_active'] != 1 && $debugResult['restaurant_status'] != 'active') $message .= "Restaurant inactive. ";
-            if ($debugResult['menu_restaurant_id'] != $merchantId) $message .= "Wrong restaurant. ";
-            
-            jsonResponse(false, null, $message, 404);
-        } else {
-            jsonResponse(false, null, 'Menu item not found in database', 404);
-        }
+        error_log("Menu item not found or inactive: ID=$menuItemId, Merchant=$merchantId");
+        jsonResponse(false, null, 'Menu item not found or unavailable', 404);
     }
-    
-    // Debug: Check column names
-    error_log("Menu item columns: " . implode(', ', array_keys($menuItem)));
-    error_log("Restaurant ID from query: " . ($menuItem['restaurant_id'] ?? 'NOT FOUND'));
-    error_log("Merchant ID from request: $merchantId");
     
     if (!$menuItem['in_stock']) {
         jsonResponse(false, null, 'This item is currently out of stock', 400);
     }
     
-    // Verify merchant - FIXED
-    $itemRestaurantId = $menuItem['restaurant_id'] ?? null;
-    if (!$itemRestaurantId) {
-        error_log("ERROR: restaurant_id column not found in menu item result");
-        error_log("Available columns: " . implode(', ', array_keys($menuItem)));
-        jsonResponse(false, null, 'Internal error: restaurant information missing', 500);
-    }
-    
-    if ($itemRestaurantId != $merchantId) {
-        error_log("Merchant mismatch: Item belongs to restaurant $itemRestaurantId but request is for merchant $merchantId");
-        jsonResponse(false, null, 'Item does not belong to this merchant', 400);
-    }
-    
     // Get or create cart session
-    $cartSession = getCartSession($conn, $userId, $sessionId, $merchantId);
+    $cartSession = findCartSession($conn, $userId, $sessionId, $merchantId);
     if (!$cartSession) {
         jsonResponse(false, null, 'Failed to create cart session', 500);
     }
@@ -423,17 +459,16 @@ function addToCart($conn, $userId, $sessionId, $data) {
     ]);
     $existingItem = $existingStmt->fetch(PDO::FETCH_ASSOC);
     
-    // Calculate price (use discounted price if available)
+    // Calculate price
     $unitPrice = $menuItem['discounted_price'] ?: $menuItem['price'];
     
     if ($existingItem) {
-        // Check if adding more would exceed max quantity
+        // Update existing item
         $newQuantity = $existingItem['quantity'] + $quantity;
         if ($newQuantity > 50) {
-            jsonResponse(false, null, 'Cannot add more than 50 of this item', 400);
+            $newQuantity = 50;
         }
         
-        // Update existing item
         $totalPrice = $unitPrice * $newQuantity;
         
         $updateQuery = "
@@ -460,7 +495,7 @@ function addToCart($conn, $userId, $sessionId, $data) {
         $action = 'updated';
         
     } else {
-        // Add new item to cart
+        // Add new item
         $totalPrice = $unitPrice * $quantity;
         
         $insertQuery = "
@@ -500,7 +535,7 @@ function addToCart($conn, $userId, $sessionId, $data) {
             ':session_id' => $cartSession['id'],
             ':item_id' => $menuItemId,
             ':name' => $menuItem['name'],
-            ':description' => $menuItem['description'],
+            ':description' => $menuItem['description'] ?? '',
             ':quantity' => $quantity,
             ':unit_price' => $unitPrice,
             ':total_price' => $totalPrice,
@@ -518,19 +553,10 @@ function addToCart($conn, $userId, $sessionId, $data) {
     // Get updated cart
     $updatedCart = getCart($conn, $userId, $sessionId, $merchantId);
     
-    // Add item details to response
-    $itemDetails = [
-        'id' => $menuItemId,
-        'name' => $menuItem['name'],
-        'price' => (float) $unitPrice,
-        'quantity' => $quantity,
-        'image' => $menuItem['image_url'] ?: 'default-menu-item.jpg'
-    ];
-    
     jsonResponse(true, [
         'action' => $action,
-        'itemId' => $itemId,
-        'item' => $itemDetails,
+        'cartItemId' => $itemId,
+        'menuItemId' => $menuItemId,
         'cart' => $updatedCart
     ], $message);
 }
@@ -539,7 +565,7 @@ function addToCart($conn, $userId, $sessionId, $data) {
  * Update cart item quantity
  */
 function updateCartItem($conn, $userId, $sessionId, $data) {
-    $itemId = intval($data['item_id'] ?? 0);
+    $itemId = intval($data['item_id'] ?? $data['cartItemId'] ?? 0);
     $quantity = max(0, intval($data['quantity'] ?? 1));
     $specialInstructions = isset($data['special_instructions']) ? trim($data['special_instructions']) : null;
     $customization = isset($data['customization']) ? $data['customization'] : null;
@@ -552,19 +578,16 @@ function updateCartItem($conn, $userId, $sessionId, $data) {
         jsonResponse(false, null, 'Maximum quantity per item is 50', 400);
     }
     
-    // Get cart item details
+    // Get cart item with merchant info
     $query = "
         SELECT 
             ci.*, 
             cs.restaurant_id as merchant_id,
-            cs.uuid as cart_uuid,
-            mi.image_url,
-            mi.name as menu_item_name
+            cs.uuid as cart_uuid
         FROM cart_items ci
         JOIN cart_sessions cs ON ci.cart_session_id = cs.id
-        LEFT JOIN menu_items mi ON ci.menu_item_id = mi.id
         WHERE ci.id = :item_id
-            AND (cs.user_id = :user_id OR cs.session_id = :session_id)
+            AND (cs.user_id = :user_id OR cs.session_id = :session_id OR cs.uuid = :session_id)
             AND cs.status = 'active'
     ";
     
@@ -581,7 +604,7 @@ function updateCartItem($conn, $userId, $sessionId, $data) {
     }
     
     if ($quantity === 0) {
-        // Remove item from cart
+        // Remove item
         $deleteQuery = "DELETE FROM cart_items WHERE id = :item_id";
         $deleteStmt = $conn->prepare($deleteQuery);
         $deleteStmt->execute([':item_id' => $itemId]);
@@ -590,7 +613,7 @@ function updateCartItem($conn, $userId, $sessionId, $data) {
         $action = 'removed';
         
     } else {
-        // Update item quantity
+        // Update item
         $totalPrice = $cartItem['unit_price'] * $quantity;
         
         $updateQuery = "
@@ -629,7 +652,7 @@ function updateCartItem($conn, $userId, $sessionId, $data) {
  * Remove item from cart
  */
 function removeFromCart($conn, $userId, $sessionId, $data) {
-    $itemId = intval($data['item_id'] ?? 0);
+    $itemId = intval($data['item_id'] ?? $data['cartItemId'] ?? 0);
     
     if (!$itemId) {
         jsonResponse(false, null, 'Cart item ID is required', 400);
@@ -681,18 +704,18 @@ function clearCart($conn, $userId, $sessionId, $data) {
     }
     
     // Get cart session
-    $cartSession = getCartSession($conn, $userId, $sessionId, $merchantId);
+    $cartSession = findCartSession($conn, $userId, $sessionId, $merchantId);
     
     if (!$cartSession) {
         jsonResponse(true, ['cart' => getCart($conn, $userId, $sessionId, $merchantId)], 'Cart is already empty');
     }
     
-    // Delete all items from this cart session
+    // Delete all items
     $deleteQuery = "DELETE FROM cart_items WHERE cart_session_id = :session_id";
     $deleteStmt = $conn->prepare($deleteQuery);
     $deleteStmt->execute([':session_id' => $cartSession['id']]);
     
-    // Update cart session
+    // Update session
     $updateQuery = "
         UPDATE cart_sessions 
         SET item_count = 0,
@@ -705,7 +728,6 @@ function clearCart($conn, $userId, $sessionId, $data) {
     $updateStmt = $conn->prepare($updateQuery);
     $updateStmt->execute([':session_id' => $cartSession['id']]);
     
-    // Get updated (empty) cart
     $updatedCart = getCart($conn, $userId, $sessionId, $merchantId);
     
     jsonResponse(true, [
@@ -715,31 +737,112 @@ function clearCart($conn, $userId, $sessionId, $data) {
 }
 
 /**
+ * Merge guest cart with user cart after login
+ */
+function mergeCart($conn, $userId, $sessionId, $data) {
+    $guestSessionId = $data['guest_session_id'] ?? null;
+    $merchantId = $data['merchant_id'] ?? null;
+    
+    if (!$guestSessionId || !$merchantId) {
+        jsonResponse(false, null, 'Guest session ID and merchant ID required', 400);
+    }
+    
+    // Get guest cart
+    $guestCart = getCart($conn, null, $guestSessionId, $merchantId);
+    
+    if (empty($guestCart['items'])) {
+        jsonResponse(true, ['cart' => getCart($conn, $userId, $sessionId, $merchantId)], 'No items to merge');
+    }
+    
+    // Get or create user cart session
+    $userCartSession = findCartSession($conn, $userId, $sessionId, $merchantId);
+    
+    if (!$userCartSession) {
+        $userCartSession = createCartSession($conn, $userId, $sessionId, $merchantId);
+    }
+    
+    // Merge items
+    foreach ($guestCart['items'] as $item) {
+        // Check if item already in user cart
+        $existingQuery = "
+            SELECT id, quantity 
+            FROM cart_items 
+            WHERE cart_session_id = :session_id 
+                AND menu_item_id = :item_id
+        ";
+        
+        $existingStmt = $conn->prepare($existingQuery);
+        $existingStmt->execute([
+            ':session_id' => $userCartSession['id'],
+            ':item_id' => $item['menuItemId']
+        ]);
+        $existingItem = $existingStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($existingItem) {
+            // Update quantity
+            $newQuantity = $existingItem['quantity'] + $item['quantity'];
+            if ($newQuantity > 50) $newQuantity = 50;
+            
+            $updateQuery = "
+                UPDATE cart_items 
+                SET quantity = :quantity,
+                    total_price = unit_price * :quantity,
+                    updated_at = NOW()
+                WHERE id = :item_id
+            ";
+            
+            $updateStmt = $conn->prepare($updateQuery);
+            $updateStmt->execute([
+                ':quantity' => $newQuantity,
+                ':item_id' => $existingItem['id']
+            ]);
+        } else {
+            // Add new item
+            $insertQuery = "
+                INSERT INTO cart_items (
+                    cart_session_id, menu_item_id, item_name, item_description,
+                    quantity, unit_price, total_price, special_instructions,
+                    customization, image_url, in_stock, created_at, updated_at
+                ) VALUES (
+                    :session_id, :item_id, :name, :description,
+                    :quantity, :unit_price, :total_price, :instructions,
+                    :customization, :image_url, :in_stock, NOW(), NOW()
+                )
+            ";
+            
+            $insertStmt = $conn->prepare($insertQuery);
+            $insertStmt->execute([
+                ':session_id' => $userCartSession['id'],
+                ':item_id' => $item['menuItemId'],
+                ':name' => $item['name'],
+                ':description' => $item['description'] ?? '',
+                ':quantity' => $item['quantity'],
+                ':unit_price' => $item['unitPrice'],
+                ':total_price' => $item['total'],
+                ':instructions' => $item['specialInstructions'] ?? '',
+                ':customization' => json_encode($item['customization'] ?? []),
+                ':image_url' => $item['image'] ?? 'default-menu-item.jpg',
+                ':in_stock' => $item['inStock'] ?? 1
+            ]);
+        }
+    }
+    
+    // Clear guest cart
+    clearCart($conn, null, $guestSessionId, ['merchant_id' => $merchantId]);
+    
+    $mergedCart = getCart($conn, $userId, $sessionId, $merchantId);
+    
+    jsonResponse(true, [
+        'action' => 'merged',
+        'cart' => $mergedCart
+    ], 'Cart merged successfully');
+}
+
+/**
  * Calculate tax amount
  */
 function calculateTax($amount) {
     // 16.5% VAT for Malawi
     return $amount * 0.165;
-}
-
-/**
- * Check if user can modify cart
- */
-function canModifyCart($conn, $userId, $sessionId, $cartSessionId) {
-    $query = "
-        SELECT id FROM cart_sessions 
-        WHERE id = :session_id 
-            AND (user_id = :user_id OR session_id = :session_id)
-            AND status = 'active'
-    ";
-    
-    $stmt = $conn->prepare($query);
-    $stmt->execute([
-        ':session_id' => $cartSessionId,
-        ':user_id' => $userId,
-        ':session_id_param' => $sessionId
-    ]);
-    
-    return $stmt->fetch() !== false;
 }
 ?>
