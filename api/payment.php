@@ -37,15 +37,15 @@ class PaymentAPI {
             $this->conn = $database->getConnection();
             $this->user_id = $_SESSION['user_id'];
             
-            // Ensure payment tables exist
-            $this->createPaymentTables();
+            // Ensure tables exist
+            $this->createTablesIfNotExist();
         } catch (Exception $e) {
             $this->sendError('Database connection failed: ' . $e->getMessage(), 500);
         }
     }
 
-    private function createPaymentTables() {
-        // Check and create payment_transactions table (wallet payments only)
+    private function createTablesIfNotExist() {
+        // Check and create payment_transactions table if needed
         $checkQuery = "SHOW TABLES LIKE 'payment_transactions'";
         $stmt = $this->conn->query($checkQuery);
         if ($stmt->rowCount() == 0) {
@@ -55,7 +55,7 @@ class PaymentAPI {
                     user_id INT NOT NULL,
                     merchant_id INT,
                     amount DECIMAL(10,2) NOT NULL,
-                    payment_method ENUM('wallet') NOT NULL,
+                    payment_method ENUM('wallet') NOT NULL DEFAULT 'wallet',
                     status ENUM('pending', 'processing', 'completed', 'failed', 'cancelled') DEFAULT 'pending',
                     reference_id VARCHAR(50) UNIQUE,
                     transaction_id VARCHAR(100),
@@ -70,14 +70,13 @@ class PaymentAPI {
                     INDEX idx_merchant (merchant_id),
                     INDEX idx_status (status),
                     INDEX idx_reference (reference_id),
-                    INDEX idx_created (created_at),
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                    INDEX idx_created (created_at)
                 )
             ";
             $this->conn->exec($createPaymentTransactions);
         }
 
-        // Check and create wallet_transactions table
+        // Check and create wallet_transactions table if needed
         $checkQuery = "SHOW TABLES LIKE 'wallet_transactions'";
         $stmt = $this->conn->query($checkQuery);
         if ($stmt->rowCount() == 0) {
@@ -85,22 +84,33 @@ class PaymentAPI {
                 CREATE TABLE wallet_transactions (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     user_id INT NOT NULL,
-                    type ENUM('deposit', 'withdrawal', 'payment', 'refund', 'transfer') NOT NULL,
+                    type ENUM('credit', 'debit') NOT NULL,
                     amount DECIMAL(10,2) NOT NULL,
-                    payment_method ENUM('wallet') NOT NULL,
+                    payment_method ENUM('wallet') NOT NULL DEFAULT 'wallet',
                     transaction_id VARCHAR(100),
-                    status ENUM('pending', 'processing', 'completed', 'failed', 'cancelled') DEFAULT 'pending',
-                    description VARCHAR(255),
-                    category VARCHAR(50),
-                    reference_id VARCHAR(100),
+                    status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'pending',
+                    description TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reference_id VARCHAR(100),
+                    sender_id INT,
+                    recipient_id INT,
+                    payment_method_id INT,
+                    balance_before DECIMAL(10,2),
+                    balance_after DECIMAL(10,2),
+                    category VARCHAR(50),
+                    order_id INT,
+                    restaurant_id INT,
+                    fee DECIMAL(10,2) DEFAULT 0,
+                    ip_address VARCHAR(45),
+                    user_agent TEXT,
+                    processed_at TIMESTAMP NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                     INDEX idx_user (user_id),
                     INDEX idx_type (type),
                     INDEX idx_status (status),
                     INDEX idx_created (created_at),
-                    INDEX idx_reference (reference_id)
+                    INDEX idx_reference (reference_id),
+                    INDEX idx_order (order_id)
                 )
             ";
             $this->conn->exec($createWalletTransactions);
@@ -155,9 +165,12 @@ class PaymentAPI {
             }
 
             // Get user's current wallet balance
-            $userBalance = $this->getWalletBalance();
-            if ($userBalance < $amount) {
-                throw new Exception('Insufficient wallet balance. Current balance: MK ' . number_format($userBalance, 2));
+            $stmt = $this->conn->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+            $stmt->execute([$this->user_id]);
+            $balanceBefore = $stmt->fetch(PDO::FETCH_COLUMN);
+            
+            if ($balanceBefore < $amount) {
+                throw new Exception('Insufficient wallet balance. Current balance: MK ' . number_format($balanceBefore, 2));
             }
 
             $this->conn->beginTransaction();
@@ -166,6 +179,9 @@ class PaymentAPI {
                 // Generate reference IDs
                 $referenceId = 'WALLET-' . time() . '-' . rand(1000, 9999);
                 $transactionId = 'TXN' . time() . rand(1000, 9999);
+                
+                // Calculate balance after payment
+                $balanceAfter = $balanceBefore - $amount;
 
                 // 1. Deduct from user's wallet
                 $stmt = $this->conn->prepare("
@@ -179,12 +195,7 @@ class PaymentAPI {
                     throw new Exception('Failed to deduct from wallet. Please check your balance.');
                 }
 
-                // 2. Add to merchant's wallet if merchant exists
-                if ($merchantId) {
-                    $this->updateMerchantWallet($merchantId, $amount);
-                }
-
-                // 3. Create payment transaction record
+                // 2. Create payment transaction record
                 $stmt = $this->conn->prepare("
                     INSERT INTO payment_transactions 
                     (user_id, merchant_id, amount, payment_method, status, 
@@ -196,6 +207,8 @@ class PaymentAPI {
                     'order_id' => $orderId,
                     'user_id' => $this->user_id,
                     'merchant_id' => $merchantId,
+                    'balance_before' => $balanceBefore,
+                    'balance_after' => $balanceAfter,
                     'payment_timestamp' => time()
                 ];
                 
@@ -211,31 +224,40 @@ class PaymentAPI {
 
                 $paymentId = $this->conn->lastInsertId();
 
-                // 4. Create wallet transaction record
+                // 3. Create wallet transaction record (type = 'debit' for payment)
                 $stmt = $this->conn->prepare("
                     INSERT INTO wallet_transactions 
                     (user_id, type, amount, payment_method, transaction_id, 
-                     status, description, category, reference_id, created_at)
-                    VALUES (?, 'payment', ?, 'wallet', ?, 'completed', ?, ?, ?, NOW())
+                     status, description, reference_id, category, balance_before, balance_after, order_id, created_at)
+                    VALUES (?, 'debit', ?, 'wallet', ?, 'completed', ?, ?, 'payment', ?, ?, ?, NOW())
                 ");
                 $stmt->execute([
                     $this->user_id,
                     $amount,
                     $transactionId,
-                    $description ?: "Payment via wallet",
-                    'payment',
-                    $referenceId
+                    $description ?: "Payment for order #{$orderId}",
+                    $referenceId,
+                    $balanceBefore,
+                    $balanceAfter,
+                    $orderId
                 ]);
+
+                // 4. Add to merchant's wallet if merchant exists
+                if ($merchantId) {
+                    $this->updateMerchantWallet($merchantId, $amount, $balanceBefore, $referenceId, $transactionId);
+                }
 
                 // 5. If order ID provided, update order payment status
                 if ($orderId) {
                     $this->updateOrderPayment($orderId, $paymentId, $referenceId);
                 }
 
-                // 6. Get updated balance
-                $newBalance = $this->getWalletBalance();
-
                 $this->conn->commit();
+
+                // Get updated balance
+                $stmt = $this->conn->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+                $stmt->execute([$this->user_id]);
+                $newBalance = $stmt->fetch(PDO::FETCH_COLUMN);
 
                 echo json_encode([
                     'success' => true,
@@ -245,8 +267,9 @@ class PaymentAPI {
                         'transaction_id' => $transactionId,
                         'amount' => $amount,
                         'payment_id' => $paymentId,
-                        'previous_balance' => $userBalance,
-                        'new_balance' => $newBalance,
+                        'balance_before' => $balanceBefore,
+                        'balance_after' => $balanceAfter,
+                        'current_balance' => $newBalance,
                         'merchant_id' => $merchantId,
                         'order_id' => $orderId,
                         'timestamp' => date('Y-m-d H:i:s')
@@ -269,14 +292,55 @@ class PaymentAPI {
         }
     }
 
+    private function updateMerchantWallet($merchantId, $amount, $userBalanceBefore, $referenceId, $transactionId) {
+        try {
+            // Get merchant's current balance
+            $stmt = $this->conn->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+            $stmt->execute([$merchantId]);
+            $merchantBalanceBefore = $stmt->fetch(PDO::FETCH_COLUMN);
+            $merchantBalanceAfter = $merchantBalanceBefore + $amount;
+
+            // Update merchant's wallet balance
+            $stmt = $this->conn->prepare("
+                UPDATE users 
+                SET wallet_balance = wallet_balance + ? 
+                WHERE id = ?
+            ");
+            $stmt->execute([$amount, $merchantId]);
+
+            // Create wallet transaction for merchant (type = 'credit' for receiving)
+            $merchantTransactionId = 'TXN-MER-' . time() . rand(1000, 9999);
+            $stmt = $this->conn->prepare("
+                INSERT INTO wallet_transactions 
+                (user_id, type, amount, payment_method, transaction_id, 
+                 status, description, reference_id, category, balance_before, balance_after, created_at)
+                VALUES (?, 'credit', ?, 'wallet', ?, 'completed', ?, ?, 'payment_received', ?, ?, NOW())
+            ");
+            $stmt->execute([
+                $merchantId,
+                $amount,
+                $merchantTransactionId,
+                "Payment received from user #{$this->user_id}",
+                $referenceId,
+                $merchantBalanceBefore,
+                $merchantBalanceAfter
+            ]);
+        } catch (Exception $e) {
+            // Log error but don't stop the main payment process
+            error_log("Failed to update merchant wallet: " . $e->getMessage());
+        }
+    }
+
     private function checkWalletBalance() {
         try {
-            $balance = $this->getWalletBalance();
+            $stmt = $this->conn->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+            $stmt->execute([$this->user_id]);
+            $balance = $stmt->fetch(PDO::FETCH_COLUMN);
             
             echo json_encode([
                 'success' => true,
                 'data' => [
-                    'balance' => $balance,
+                    'balance' => (float)$balance,
                     'formatted_balance' => 'MK ' . number_format($balance, 2),
                     'user_id' => $this->user_id
                 ]
@@ -299,10 +363,8 @@ class PaymentAPI {
 
             // Build query
             $query = "
-                SELECT wt.*,
-                       u.name as merchant_name
+                SELECT wt.*
                 FROM wallet_transactions wt
-                LEFT JOIN users u ON wt.reference_id LIKE CONCAT('%', u.id, '%')
                 WHERE wt.user_id = ?
             ";
             
@@ -346,12 +408,14 @@ class PaymentAPI {
                     'transaction_id' => $transaction['transaction_id'],
                     'status' => $transaction['status'],
                     'description' => $transaction['description'],
-                    'category' => $transaction['category'],
                     'reference_id' => $transaction['reference_id'],
-                    'merchant_name' => $transaction['merchant_name'],
+                    'balance_before' => (float)$transaction['balance_before'],
+                    'balance_after' => (float)$transaction['balance_after'],
+                    'category' => $transaction['category'],
+                    'order_id' => $transaction['order_id'],
                     'created_at' => $transaction['created_at'],
                     'formatted_amount' => 'MK ' . number_format($transaction['amount'], 2),
-                    'is_debit' => in_array($transaction['type'], ['payment', 'withdrawal', 'transfer'])
+                    'is_debit' => $transaction['type'] === 'debit'
                 ];
             }, $transactions);
 
@@ -384,7 +448,9 @@ class PaymentAPI {
             $total = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
 
             // Get current balance
-            $balance = $this->getWalletBalance();
+            $stmt = $this->conn->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+            $stmt->execute([$this->user_id]);
+            $balance = $stmt->fetch(PDO::FETCH_COLUMN);
 
             echo json_encode([
                 'success' => true,
@@ -397,7 +463,7 @@ class PaymentAPI {
                         'pages' => ceil($total / $limit)
                     ],
                     'wallet_summary' => [
-                        'current_balance' => $balance,
+                        'current_balance' => (float)$balance,
                         'formatted_balance' => 'MK ' . number_format($balance, 2),
                         'total_transactions' => (int)$total
                     ]
@@ -468,6 +534,8 @@ class PaymentAPI {
                     'merchant_name' => $payment['merchant_name'],
                     'merchant_phone' => $payment['merchant_phone'],
                     'order_id' => $metadata['order_id'] ?? null,
+                    'balance_before' => $metadata['balance_before'] ?? null,
+                    'balance_after' => $metadata['balance_after'] ?? null,
                     'created_at' => $payment['created_at'],
                     'formatted_amount' => 'MK ' . number_format($payment['amount'], 2),
                     'formatted_date' => date('M d, Y H:i', strtotime($payment['created_at']))
@@ -532,62 +600,9 @@ class PaymentAPI {
         }
     }
 
-    // Helper Methods
-    private function getWalletBalance() {
-        $stmt = $this->conn->prepare("
-            SELECT wallet_balance FROM users WHERE id = ?
-        ");
-        $stmt->execute([$this->user_id]);
-        $result = $stmt->fetch(PDO::FETCH_COLUMN);
-        return $result !== false ? (float)$result : 0.00;
-    }
-
-    private function updateMerchantWallet($merchantId, $amount) {
-        try {
-            // Check if merchant exists and has wallet
-            $stmt = $this->conn->prepare("
-                SELECT id, user_type FROM users WHERE id = ?
-            ");
-            $stmt->execute([$merchantId]);
-            $merchant = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($merchant && $merchant['user_type'] === 'merchant') {
-                // Update merchant's wallet balance
-                $stmt = $this->conn->prepare("
-                    UPDATE users 
-                    SET wallet_balance = wallet_balance + ? 
-                    WHERE id = ?
-                ");
-                $stmt->execute([$amount, $merchantId]);
-                
-                // Create wallet transaction for merchant
-                $referenceId = 'MERCHANT-' . time() . '-' . rand(1000, 9999);
-                $transactionId = 'TXN-MER-' . time() . rand(1000, 9999);
-                
-                $stmt = $this->conn->prepare("
-                    INSERT INTO wallet_transactions 
-                    (user_id, type, amount, payment_method, transaction_id, 
-                     status, description, category, reference_id, created_at)
-                    VALUES (?, 'deposit', ?, 'wallet', ?, 'completed', ?, ?, ?, NOW())
-                ");
-                $stmt->execute([
-                    $merchantId,
-                    $amount,
-                    $transactionId,
-                    "Payment from user #{$this->user_id}",
-                    'payment_received',
-                    $referenceId
-                ]);
-            }
-        } catch (Exception $e) {
-            // Log error but don't stop the main payment process
-            error_log("Failed to update merchant wallet: " . $e->getMessage());
-        }
-    }
-
     private function updateOrderPayment($orderId, $paymentId, $referenceId) {
         try {
-            // This assumes you have an orders table
+            // Check if orders table exists
             $checkTable = "SHOW TABLES LIKE 'orders'";
             $stmt = $this->conn->query($checkTable);
             
