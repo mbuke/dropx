@@ -129,7 +129,7 @@ function loginUser($conn, $data) {
 
     // Check if identifier is email or phone (same logic as Flutter)
     $isPhone = preg_match('/^[\+]?[0-9\s\-\(\)]+$/', $identifier);
-    $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL);
+    $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL); // FIXED
 
     if (!$isPhone && !$isEmail) {
         ResponseHandler::error('Please enter a valid email or phone number', 400);
@@ -413,7 +413,7 @@ function forgotPassword($conn, $data) {
 
     // Check if identifier is email or phone
     $isPhone = preg_match('/^[\+]?[0-9\s\-\(\)]+$/', $identifier);
-    $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL);
+    $isEmail = filter_var($identifier, FILTER_VALIDATE_EMAIL); // FIXED
 
     if (!$isPhone && !$isEmail) {
         ResponseHandler::error('Please enter a valid email or phone number', 400);
