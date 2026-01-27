@@ -200,7 +200,8 @@ function registerUser($conn, $data) {
         ResponseHandler::error('Email address is required', 400);
     }
     
-    if (!$filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    // FIXED: Changed $filter_var to filter_var()
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         ResponseHandler::error('Enter a valid email address', 400);
     }
     
@@ -297,7 +298,8 @@ function updateProfile($conn, $data) {
         ResponseHandler::error('Email is required', 400);
     }
     
-    if (!$filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    // FIXED: Changed $filter_var to filter_var()
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         ResponseHandler::error('Enter a valid email address', 400);
     }
     
