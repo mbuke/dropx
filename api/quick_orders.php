@@ -8,6 +8,10 @@ header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Content-Type: application/json; charset=UTF-8");
 
+// Enable error reporting for debugging
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
@@ -55,6 +59,10 @@ function handleGetRequest() {
     $db = new Database();
     $conn = $db->getConnection();
 
+    if (!$conn) {
+        ResponseHandler::error('Database connection failed', 500);
+    }
+
     // Check for specific quick order ID
     $orderId = $_GET['id'] ?? null;
     
@@ -80,8 +88,8 @@ function getQuickOrdersList($conn) {
     $sortOrder = strtoupper($_GET['sort_order'] ?? 'DESC');
     $isPopular = $_GET['is_popular'] ?? null;
 
-    // Build WHERE clause
-    $whereConditions = ["qo.is_active = 1"];
+    // Build WHERE clause - REMOVED qo.is_active = 1 since column doesn't exist
+    $whereConditions = [];
     $params = [];
 
     if ($category && $category !== 'All') {
@@ -99,7 +107,7 @@ function getQuickOrdersList($conn) {
         $params[':is_popular'] = $isPopular === 'true' ? 1 : 0;
     }
 
-    $whereClause = "WHERE " . implode(" AND ", $whereConditions);
+    $whereClause = empty($whereConditions) ? "" : "WHERE " . implode(" AND ", $whereConditions);
 
     // Validate sort options
     $allowedSortColumns = ['order_count', 'title', 'created_at', 'rating'];
@@ -107,7 +115,7 @@ function getQuickOrdersList($conn) {
     $sortOrder = $sortOrder === 'ASC' ? 'ASC' : 'DESC';
 
     // Get total count for pagination
-    $countSql = "SELECT COUNT(*) as total FROM quick_orders qo $whereClause";
+    $countSql = "SELECT COUNT(*) as total FROM quick_orders qo" . ($whereClause ? " $whereClause" : "");
     $countStmt = $conn->prepare($countSql);
     $countStmt->execute($params);
     $totalCount = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
@@ -183,7 +191,7 @@ function getQuickOrderDetails($conn, $orderId) {
             qo.created_at,
             qo.updated_at
         FROM quick_orders qo
-        WHERE qo.id = :id AND qo.is_active = 1"
+        WHERE qo.id = :id" // Removed AND qo.is_active = 1
     );
     
     $stmt->execute([':id' => $orderId]);
@@ -227,7 +235,6 @@ function getQuickOrderDetails($conn, $orderId) {
         INNER JOIN quick_order_merchants qom ON m.id = qom.merchant_id
         WHERE qom.quick_order_id = :quick_order_id
         AND m.is_active = 1
-        AND m.is_open = 1
         ORDER BY m.rating DESC, m.distance ASC
         LIMIT 5"
     );
@@ -251,9 +258,18 @@ function handlePostRequest() {
     $db = new Database();
     $conn = $db->getConnection();
 
+    if (!$conn) {
+        ResponseHandler::error('Database connection failed', 500);
+    }
+
+    // Get input data
     $input = json_decode(file_get_contents('php://input'), true);
-    if (!$input) {
+    if (!$input && !empty($_POST)) {
         $input = $_POST;
+    }
+    
+    if (!$input) {
+        ResponseHandler::error('No input data provided', 400);
     }
     
     $action = $input['action'] ?? '';
@@ -272,7 +288,7 @@ function handlePostRequest() {
             rateQuickOrder($conn, $input);
             break;
         default:
-            ResponseHandler::error('Invalid action', 400);
+            ResponseHandler::error('Invalid action: ' . $action, 400);
     }
 }
 
@@ -311,7 +327,7 @@ function createQuickOrder($conn, $data) {
 
     // Get quick order details
     $orderStmt = $conn->prepare(
-        "SELECT title, price_range, delivery_time FROM quick_orders WHERE id = :id AND is_active = 1"
+        "SELECT title, price_range, delivery_time FROM quick_orders WHERE id = :id"
     );
     $orderStmt->execute([':id' => $quickOrderId]);
     $quickOrder = $orderStmt->fetch(PDO::FETCH_ASSOC);
@@ -446,6 +462,7 @@ function createQuickOrder($conn, $data) {
 
     } catch (Exception $e) {
         $conn->rollBack();
+        error_log("Order creation error: " . $e->getMessage());
         ResponseHandler::error('Failed to create order: ' . $e->getMessage(), 500);
     }
 }
@@ -501,8 +518,8 @@ function getQuickOrderHistory($conn, $data) {
                 m.name as merchant_name,
                 m.image_url as merchant_image
             FROM orders o
-            INNER JOIN quick_orders qo ON o.quick_order_id = qo.id
-            INNER JOIN merchants m ON o.merchant_id = m.id
+            LEFT JOIN quick_orders qo ON o.quick_order_id = qo.id
+            LEFT JOIN merchants m ON o.merchant_id = m.id
             $whereClause
             ORDER BY o.created_at DESC
             LIMIT :limit OFFSET :offset";
@@ -691,8 +708,8 @@ function getOrderDetails($conn, $orderId) {
                 m.phone as merchant_phone,
                 m.address as merchant_address
             FROM orders o
-            INNER JOIN quick_orders qo ON o.quick_order_id = qo.id
-            INNER JOIN merchants m ON o.merchant_id = m.id
+            LEFT JOIN quick_orders qo ON o.quick_order_id = qo.id
+            LEFT JOIN merchants m ON o.merchant_id = m.id
             WHERE o.id = :id";
 
     $stmt = $conn->prepare($sql);
@@ -734,7 +751,7 @@ function updateQuickOrderRating($conn, $quickOrderId) {
  *********************************/
 function formatQuickOrderListData($q) {
     return [
-        'id' => $q['id'],
+        'id' => $q['id'] ?? null,
         'title' => $q['title'] ?? '',
         'image_url' => $q['image_url'] ?? '',
         'color' => $q['color'] ?? '#3A86FF',
@@ -756,7 +773,7 @@ function formatQuickOrderListData($q) {
  *********************************/
 function formatQuickOrderDetailData($q) {
     return [
-        'id' => $q['id'],
+        'id' => $q['id'] ?? null,
         'title' => $q['title'] ?? '',
         'image_url' => $q['image_url'] ?? '',
         'color' => $q['color'] ?? '#3A86FF',
@@ -778,7 +795,7 @@ function formatQuickOrderDetailData($q) {
  *********************************/
 function formatQuickOrderItemData($item) {
     return [
-        'id' => $item['id'],
+        'id' => $item['id'] ?? null,
         'name' => $item['name'] ?? '',
         'description' => $item['description'] ?? '',
         'price' => floatval($item['price'] ?? 0),
@@ -793,7 +810,7 @@ function formatQuickOrderItemData($item) {
  *********************************/
 function formatQuickOrderMerchantData($merchant) {
     return [
-        'id' => $merchant['id'],
+        'id' => $merchant['id'] ?? null,
         'name' => $merchant['name'] ?? '',
         'category' => $merchant['category'] ?? '',
         'rating' => floatval($merchant['rating'] ?? 0),
@@ -810,22 +827,22 @@ function formatQuickOrderMerchantData($merchant) {
  *********************************/
 function formatOrderData($order) {
     return [
-        'id' => $order['id'],
-        'order_number' => $order['order_number'],
-        'status' => $order['status'],
+        'id' => $order['id'] ?? null,
+        'order_number' => $order['order_number'] ?? '',
+        'status' => $order['status'] ?? '',
         'subtotal' => floatval($order['subtotal'] ?? 0),
         'delivery_fee' => floatval($order['delivery_fee'] ?? 0),
         'total_amount' => floatval($order['total_amount'] ?? 0),
-        'payment_method' => $order['payment_method'],
-        'delivery_address' => $order['delivery_address'],
-        'special_instructions' => $order['special_instructions'],
-        'quick_order_title' => $order['quick_order_title'],
-        'quick_order_image' => $order['quick_order_image'],
-        'merchant_name' => $order['merchant_name'],
-        'merchant_phone' => $order['merchant_phone'],
-        'merchant_address' => $order['merchant_address'],
-        'created_at' => $order['created_at'],
-        'updated_at' => $order['updated_at']
+        'payment_method' => $order['payment_method'] ?? '',
+        'delivery_address' => $order['delivery_address'] ?? '',
+        'special_instructions' => $order['special_instructions'] ?? '',
+        'quick_order_title' => $order['quick_order_title'] ?? '',
+        'quick_order_image' => $order['quick_order_image'] ?? '',
+        'merchant_name' => $order['merchant_name'] ?? '',
+        'merchant_phone' => $order['merchant_phone'] ?? '',
+        'merchant_address' => $order['merchant_address'] ?? '',
+        'created_at' => $order['created_at'] ?? '',
+        'updated_at' => $order['updated_at'] ?? ''
     ];
 }
 
@@ -834,21 +851,21 @@ function formatOrderData($order) {
  *********************************/
 function formatOrderHistoryData($order) {
     return [
-        'id' => $order['id'],
-        'order_number' => $order['order_number'],
-        'status' => $order['status'],
+        'id' => $order['id'] ?? null,
+        'order_number' => $order['order_number'] ?? '',
+        'status' => $order['status'] ?? '',
         'subtotal' => floatval($order['subtotal'] ?? 0),
         'delivery_fee' => floatval($order['delivery_fee'] ?? 0),
         'total_amount' => floatval($order['total_amount'] ?? 0),
-        'payment_method' => $order['payment_method'],
-        'delivery_address' => $order['delivery_address'],
-        'special_instructions' => $order['special_instructions'],
-        'quick_order_title' => $order['quick_order_title'],
-        'quick_order_image' => $order['quick_order_image'],
-        'merchant_name' => $order['merchant_name'],
-        'merchant_image' => $order['merchant_image'],
-        'created_at' => $order['created_at'],
-        'updated_at' => $order['updated_at']
+        'payment_method' => $order['payment_method'] ?? '',
+        'delivery_address' => $order['delivery_address'] ?? '',
+        'special_instructions' => $order['special_instructions'] ?? '',
+        'quick_order_title' => $order['quick_order_title'] ?? '',
+        'quick_order_image' => $order['quick_order_image'] ?? '',
+        'merchant_name' => $order['merchant_name'] ?? '',
+        'merchant_image' => $order['merchant_image'] ?? '',
+        'created_at' => $order['created_at'] ?? '',
+        'updated_at' => $order['updated_at'] ?? ''
     ];
 }
 ?>
