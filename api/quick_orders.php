@@ -36,6 +36,12 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
 /*********************************
+ * BASE URL CONFIGURATION
+ *********************************/
+// Update this with your actual backend URL
+$baseUrl = "https://dropxbackend-production.up.railway.app";
+
+/*********************************
  * ROUTER
  *********************************/
 try {
@@ -56,6 +62,7 @@ try {
  * GET REQUESTS
  *********************************/
 function handleGetRequest() {
+    global $baseUrl;
     $db = new Database();
     $conn = $db->getConnection();
 
@@ -67,16 +74,16 @@ function handleGetRequest() {
     $orderId = $_GET['id'] ?? null;
     
     if ($orderId) {
-        getQuickOrderDetails($conn, $orderId);
+        getQuickOrderDetails($conn, $orderId, $baseUrl);
     } else {
-        getQuickOrdersList($conn);
+        getQuickOrdersList($conn, $baseUrl);
     }
 }
 
 /*********************************
  * GET QUICK ORDERS LIST
  *********************************/
-function getQuickOrdersList($conn) {
+function getQuickOrdersList($conn, $baseUrl) {
     // Get query parameters
     $page = max(1, intval($_GET['page'] ?? 1));
     $limit = min(50, max(1, intval($_GET['limit'] ?? 20)));
@@ -157,7 +164,9 @@ function getQuickOrdersList($conn) {
     $quickOrders = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Format quick order data
-    $formattedOrders = array_map('formatQuickOrderListData', $quickOrders);
+    $formattedOrders = array_map(function($q) use ($baseUrl) {
+        return formatQuickOrderListData($q, $baseUrl);
+    }, $quickOrders);
 
     ResponseHandler::success([
         'quick_orders' => $formattedOrders,
@@ -173,7 +182,7 @@ function getQuickOrdersList($conn) {
 /*********************************
  * GET QUICK ORDER DETAILS
  *********************************/
-function getQuickOrderDetails($conn, $orderId) {
+function getQuickOrderDetails($conn, $orderId, $baseUrl) {
     $stmt = $conn->prepare(
         "SELECT 
             qo.id,
@@ -242,9 +251,13 @@ function getQuickOrderDetails($conn, $orderId) {
     $merchantsStmt->execute([':quick_order_id' => $orderId]);
     $merchants = $merchantsStmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $orderData = formatQuickOrderDetailData($quickOrder);
-    $orderData['items'] = array_map('formatQuickOrderItemData', $items);
-    $orderData['merchants'] = array_map('formatQuickOrderMerchantData', $merchants);
+    $orderData = formatQuickOrderDetailData($quickOrder, $baseUrl);
+    $orderData['items'] = array_map(function($item) use ($baseUrl) {
+        return formatQuickOrderItemData($item, $baseUrl);
+    }, $items);
+    $orderData['merchants'] = array_map(function($merchant) use ($baseUrl) {
+        return formatQuickOrderMerchantData($merchant, $baseUrl);
+    }, $merchants);
 
     ResponseHandler::success([
         'quick_order' => $orderData
@@ -255,6 +268,7 @@ function getQuickOrderDetails($conn, $orderId) {
  * POST REQUESTS
  *********************************/
 function handlePostRequest() {
+    global $baseUrl;
     $db = new Database();
     $conn = $db->getConnection();
 
@@ -279,7 +293,7 @@ function handlePostRequest() {
             createQuickOrder($conn, $input);
             break;
         case 'get_order_history':
-            getQuickOrderHistory($conn, $input);
+            getQuickOrderHistory($conn, $input, $baseUrl);
             break;
         case 'cancel_order':
             cancelQuickOrder($conn, $input);
@@ -470,7 +484,7 @@ function createQuickOrder($conn, $data) {
 /*********************************
  * GET QUICK ORDER HISTORY
  *********************************/
-function getQuickOrderHistory($conn, $data) {
+function getQuickOrderHistory($conn, $data, $baseUrl) {
     // Check authentication
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Authentication required', 401);
@@ -540,7 +554,9 @@ function getQuickOrderHistory($conn, $data) {
     $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Format orders
-    $formattedOrders = array_map('formatOrderHistoryData', $orders);
+    $formattedOrders = array_map(function($order) use ($baseUrl) {
+        return formatOrderHistoryData($order, $baseUrl);
+    }, $orders);
 
     ResponseHandler::success([
         'orders' => $formattedOrders,
@@ -749,11 +765,22 @@ function updateQuickOrderRating($conn, $quickOrderId) {
 /*********************************
  * FORMAT QUICK ORDER LIST DATA
  *********************************/
-function formatQuickOrderListData($q) {
+function formatQuickOrderListData($q, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($q['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($q['image_url'], 'http') === 0) {
+            $imageUrl = $q['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $q['image_url'];
+        }
+    }
+    
     return [
         'id' => $q['id'] ?? null,
         'title' => $q['title'] ?? '',
-        'image_url' => $q['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'color' => $q['color'] ?? '#3A86FF',
         'info' => $q['info'] ?? '',
         'is_popular' => boolval($q['is_popular'] ?? false),
@@ -771,11 +798,22 @@ function formatQuickOrderListData($q) {
 /*********************************
  * FORMAT QUICK ORDER DETAIL DATA
  *********************************/
-function formatQuickOrderDetailData($q) {
+function formatQuickOrderDetailData($q, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($q['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($q['image_url'], 'http') === 0) {
+            $imageUrl = $q['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $q['image_url'];
+        }
+    }
+    
     return [
         'id' => $q['id'] ?? null,
         'title' => $q['title'] ?? '',
-        'image_url' => $q['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'color' => $q['color'] ?? '#3A86FF',
         'info' => $q['info'] ?? '',
         'is_popular' => boolval($q['is_popular'] ?? false),
@@ -793,13 +831,24 @@ function formatQuickOrderDetailData($q) {
 /*********************************
  * FORMAT QUICK ORDER ITEM DATA
  *********************************/
-function formatQuickOrderItemData($item) {
+function formatQuickOrderItemData($item, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($item['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($item['image_url'], 'http') === 0) {
+            $imageUrl = $item['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $item['image_url'];
+        }
+    }
+    
     return [
         'id' => $item['id'] ?? null,
         'name' => $item['name'] ?? '',
         'description' => $item['description'] ?? '',
         'price' => floatval($item['price'] ?? 0),
-        'image_url' => $item['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'is_default' => boolval($item['is_default'] ?? false),
         'created_at' => $item['created_at'] ?? ''
     ];
@@ -808,13 +857,24 @@ function formatQuickOrderItemData($item) {
 /*********************************
  * FORMAT QUICK ORDER MERCHANT DATA
  *********************************/
-function formatQuickOrderMerchantData($merchant) {
+function formatQuickOrderMerchantData($merchant, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($merchant['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($merchant['image_url'], 'http') === 0) {
+            $imageUrl = $merchant['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $merchant['image_url'];
+        }
+    }
+    
     return [
         'id' => $merchant['id'] ?? null,
         'name' => $merchant['name'] ?? '',
         'category' => $merchant['category'] ?? '',
         'rating' => floatval($merchant['rating'] ?? 0),
-        'image_url' => $merchant['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'is_open' => boolval($merchant['is_open'] ?? false),
         'delivery_time' => $merchant['delivery_time'] ?? '',
         'delivery_fee' => floatval($merchant['delivery_fee'] ?? 0),
@@ -826,6 +886,30 @@ function formatQuickOrderMerchantData($merchant) {
  * FORMAT ORDER DATA
  *********************************/
 function formatOrderData($order) {
+    global $baseUrl;
+    
+    $quickOrderImage = '';
+    if (!empty($order['quick_order_image'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($order['quick_order_image'], 'http') === 0) {
+            $quickOrderImage = $order['quick_order_image'];
+        } else {
+            // Otherwise, build the full URL
+            $quickOrderImage = rtrim($baseUrl, '/') . '/uploads/' . $order['quick_order_image'];
+        }
+    }
+    
+    $merchantImage = '';
+    if (!empty($order['merchant_image'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($order['merchant_image'], 'http') === 0) {
+            $merchantImage = $order['merchant_image'];
+        } else {
+            // Otherwise, build the full URL
+            $merchantImage = rtrim($baseUrl, '/') . '/uploads/' . $order['merchant_image'];
+        }
+    }
+    
     return [
         'id' => $order['id'] ?? null,
         'order_number' => $order['order_number'] ?? '',
@@ -837,10 +921,11 @@ function formatOrderData($order) {
         'delivery_address' => $order['delivery_address'] ?? '',
         'special_instructions' => $order['special_instructions'] ?? '',
         'quick_order_title' => $order['quick_order_title'] ?? '',
-        'quick_order_image' => $order['quick_order_image'] ?? '',
+        'quick_order_image' => $quickOrderImage,
         'merchant_name' => $order['merchant_name'] ?? '',
         'merchant_phone' => $order['merchant_phone'] ?? '',
         'merchant_address' => $order['merchant_address'] ?? '',
+        'merchant_image' => $merchantImage,
         'created_at' => $order['created_at'] ?? '',
         'updated_at' => $order['updated_at'] ?? ''
     ];
@@ -849,7 +934,29 @@ function formatOrderData($order) {
 /*********************************
  * FORMAT ORDER HISTORY DATA
  *********************************/
-function formatOrderHistoryData($order) {
+function formatOrderHistoryData($order, $baseUrl) {
+    $quickOrderImage = '';
+    if (!empty($order['quick_order_image'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($order['quick_order_image'], 'http') === 0) {
+            $quickOrderImage = $order['quick_order_image'];
+        } else {
+            // Otherwise, build the full URL
+            $quickOrderImage = rtrim($baseUrl, '/') . '/uploads/' . $order['quick_order_image'];
+        }
+    }
+    
+    $merchantImage = '';
+    if (!empty($order['merchant_image'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($order['merchant_image'], 'http') === 0) {
+            $merchantImage = $order['merchant_image'];
+        } else {
+            // Otherwise, build the full URL
+            $merchantImage = rtrim($baseUrl, '/') . '/uploads/' . $order['merchant_image'];
+        }
+    }
+    
     return [
         'id' => $order['id'] ?? null,
         'order_number' => $order['order_number'] ?? '',
@@ -861,9 +968,9 @@ function formatOrderHistoryData($order) {
         'delivery_address' => $order['delivery_address'] ?? '',
         'special_instructions' => $order['special_instructions'] ?? '',
         'quick_order_title' => $order['quick_order_title'] ?? '',
-        'quick_order_image' => $order['quick_order_image'] ?? '',
+        'quick_order_image' => $quickOrderImage,
         'merchant_name' => $order['merchant_name'] ?? '',
-        'merchant_image' => $order['merchant_image'] ?? '',
+        'merchant_image' => $merchantImage,
         'created_at' => $order['created_at'] ?? '',
         'updated_at' => $order['updated_at'] ?? ''
     ];
