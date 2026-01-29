@@ -32,6 +32,12 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
 /*********************************
+ * BASE URL CONFIGURATION
+ *********************************/
+// Update this with your actual backend URL
+$baseUrl = "https://dropxbackend-production.up.railway.app";
+
+/*********************************
  * ROUTER
  *********************************/
 try {
@@ -52,6 +58,7 @@ try {
  * GET REQUESTS
  *********************************/
 function handleGetRequest() {
+    global $baseUrl;
     $db = new Database();
     $conn = $db->getConnection();
 
@@ -59,16 +66,16 @@ function handleGetRequest() {
     $merchantId = $_GET['id'] ?? null;
     
     if ($merchantId) {
-        getMerchantDetails($conn, $merchantId);
+        getMerchantDetails($conn, $merchantId, $baseUrl);
     } else {
-        getMerchantsList($conn);
+        getMerchantsList($conn, $baseUrl);
     }
 }
 
 /*********************************
  * GET MERCHANTS LIST
  *********************************/
-function getMerchantsList($conn) {
+function getMerchantsList($conn, $baseUrl) {
     // Get query parameters
     $page = max(1, intval($_GET['page'] ?? 1));
     $limit = min(50, max(1, intval($_GET['limit'] ?? 20)));
@@ -131,7 +138,7 @@ function getMerchantsList($conn) {
                 m.category,
                 m.rating,
                 m.review_count,
-                CONCAT(m.delivery_time, ' • $', m.delivery_fee, ' fee') as delivery_info,
+                CONCAT(m.delivery_time, ' • MK ', FORMAT(m.delivery_fee, 0), ' fee') as delivery_info,
                 m.image_url,
                 m.is_open,
                 m.is_promoted,
@@ -158,7 +165,9 @@ function getMerchantsList($conn) {
     $merchants = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // Format merchant data
-    $formattedMerchants = array_map('formatMerchantListData', $merchants);
+    $formattedMerchants = array_map(function($m) use ($baseUrl) {
+        return formatMerchantListData($m, $baseUrl);
+    }, $merchants);
 
     ResponseHandler::success([
         'merchants' => $formattedMerchants,
@@ -174,7 +183,7 @@ function getMerchantsList($conn) {
 /*********************************
  * GET MERCHANT DETAILS
  *********************************/
-function getMerchantDetails($conn, $merchantId) {
+function getMerchantDetails($conn, $merchantId, $baseUrl) {
     $stmt = $conn->prepare(
         "SELECT 
             m.id,
@@ -182,7 +191,7 @@ function getMerchantDetails($conn, $merchantId) {
             m.category,
             m.rating,
             m.review_count,
-            CONCAT(m.delivery_time, ' • $', m.delivery_fee, ' fee') as delivery_info,
+            CONCAT(m.delivery_time, ' • MK ', FORMAT(m.delivery_fee, 0), ' fee') as delivery_info,
             m.image_url,
             m.is_open,
             m.is_promoted,
@@ -242,7 +251,7 @@ function getMerchantDetails($conn, $merchantId) {
         $isFavorite = $favStmt->fetch() ? true : false;
     }
 
-    $merchantData = formatMerchantDetailData($merchant);
+    $merchantData = formatMerchantDetailData($merchant, $baseUrl);
     $merchantData['reviews'] = array_map('formatReviewData', $reviews);
     $merchantData['is_favorite'] = $isFavorite;
 
@@ -255,6 +264,7 @@ function getMerchantDetails($conn, $merchantId) {
  * POST REQUESTS
  *********************************/
 function handlePostRequest() {
+    global $baseUrl;
     $db = new Database();
     $conn = $db->getConnection();
 
@@ -273,7 +283,7 @@ function handlePostRequest() {
             toggleMerchantFavorite($conn, $input);
             break;
         case 'get_favorites':
-            getFavoriteMerchants($conn, $input);
+            getFavoriteMerchants($conn, $input, $baseUrl);
             break;
         case 'report_merchant':
             reportMerchant($conn, $input);
@@ -411,7 +421,7 @@ function toggleMerchantFavorite($conn, $data) {
 /*********************************
  * GET FAVORITE MERCHANTS
  *********************************/
-function getFavoriteMerchants($conn, $data) {
+function getFavoriteMerchants($conn, $data, $baseUrl) {
     // Check authentication
     if (empty($_SESSION['user_id'])) {
         ResponseHandler::error('Authentication required', 401);
@@ -428,7 +438,7 @@ function getFavoriteMerchants($conn, $data) {
                 m.category,
                 m.rating,
                 m.review_count,
-                CONCAT(m.delivery_time, ' • $', m.delivery_fee, ' fee') as delivery_info,
+                CONCAT(m.delivery_time, ' • MK ', FORMAT(m.delivery_fee, 0), ' fee') as delivery_info,
                 m.image_url,
                 m.is_open,
                 m.is_promoted,
@@ -459,7 +469,9 @@ function getFavoriteMerchants($conn, $data) {
     $countStmt->execute([':user_id' => $userId]);
     $totalCount = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
 
-    $formattedMerchants = array_map('formatMerchantListData', $merchants);
+    $formattedMerchants = array_map(function($m) use ($baseUrl) {
+        return formatMerchantListData($m, $baseUrl);
+    }, $merchants);
 
     ResponseHandler::success([
         'merchants' => $formattedMerchants,
@@ -551,7 +563,18 @@ function updateMerchantRating($conn, $merchantId) {
 /*********************************
  * FORMAT MERCHANT LIST DATA
  *********************************/
-function formatMerchantListData($m) {
+function formatMerchantListData($m, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($m['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($m['image_url'], 'http') === 0) {
+            $imageUrl = $m['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $m['image_url'];
+        }
+    }
+    
     return [
         'id' => $m['id'],
         'name' => $m['name'] ?? '',
@@ -559,7 +582,7 @@ function formatMerchantListData($m) {
         'rating' => floatval($m['rating'] ?? 0),
         'review_count' => intval($m['review_count'] ?? 0),
         'delivery_info' => $m['delivery_info'] ?? '',
-        'image_url' => $m['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'is_open' => boolval($m['is_open'] ?? false),
         'is_promoted' => boolval($m['is_promoted'] ?? false),
         'created_at' => $m['created_at'] ?? '',
@@ -570,7 +593,18 @@ function formatMerchantListData($m) {
 /*********************************
  * FORMAT MERCHANT DETAIL DATA
  *********************************/
-function formatMerchantDetailData($m) {
+function formatMerchantDetailData($m, $baseUrl) {
+    $imageUrl = '';
+    if (!empty($m['image_url'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($m['image_url'], 'http') === 0) {
+            $imageUrl = $m['image_url'];
+        } else {
+            // Otherwise, build the full URL
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/' . $m['image_url'];
+        }
+    }
+    
     $popularItems = [];
     if (!empty($m['popular_items'])) {
         $popularItems = json_decode($m['popular_items'], true);
@@ -594,7 +628,7 @@ function formatMerchantDetailData($m) {
         'rating' => floatval($m['rating'] ?? 0),
         'review_count' => intval($m['review_count'] ?? 0),
         'delivery_info' => $m['delivery_info'] ?? '',
-        'image_url' => $m['image_url'] ?? '',
+        'image_url' => $imageUrl,
         'is_open' => boolval($m['is_open'] ?? false),
         'is_promoted' => boolval($m['is_promoted'] ?? false),
         'full_description' => $m['full_description'] ?? '',
@@ -615,11 +649,24 @@ function formatMerchantDetailData($m) {
  * FORMAT REVIEW DATA
  *********************************/
 function formatReviewData($review) {
+    global $baseUrl;
+    
+    $avatarUrl = '';
+    if (!empty($review['user_avatar'])) {
+        // If it's already a full URL, use it as is
+        if (strpos($review['user_avatar'], 'http') === 0) {
+            $avatarUrl = $review['user_avatar'];
+        } else {
+            // Otherwise, build the full URL
+            $avatarUrl = rtrim($baseUrl, '/') . '/uploads/avatars/' . $review['user_avatar'];
+        }
+    }
+    
     return [
         'id' => $review['id'],
         'user_id' => $review['user_id'],
         'user_name' => $review['user_name'] ?? 'Anonymous',
-        'user_avatar' => $review['user_avatar'] ?? null,
+        'user_avatar' => $avatarUrl,
         'rating' => intval($review['rating'] ?? 0),
         'comment' => $review['comment'] ?? '',
         'created_at' => $review['created_at'] ?? ''
