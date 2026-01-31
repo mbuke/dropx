@@ -5,7 +5,7 @@
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token, Cookie");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Content-Type: application/json; charset=UTF-8");
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -14,32 +14,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 /*********************************
- * SESSION CONFIGURATION
+ * SESSION CONFIG - MUST MATCH auth.php EXACTLY
  *********************************/
-function initializeSession() {
-    // Check if session token is in headers
-    $sessionToken = null;
-    
-    // 1. Check X-Session-Token header (Flutter sends this)
-    if (isset($_SERVER['HTTP_X_SESSION_TOKEN'])) {
-        $sessionToken = $_SERVER['HTTP_X_SESSION_TOKEN'];
-    }
-    
-    // 2. Check Cookie header for PHPSESSID (Flutter also sends this)
-    if (!$sessionToken && isset($_SERVER['HTTP_COOKIE'])) {
-        $cookies = [];
-        parse_str(str_replace('; ', '&', $_SERVER['HTTP_COOKIE']), $cookies);
-        if (isset($cookies['PHPSESSID'])) {
-            $sessionToken = $cookies['PHPSESSID'];
-        }
-    }
-    
-    // If no session token found, authentication will fail
-    if (!$sessionToken) {
-        return false;
-    }
-    
-    // Configure session exactly like auth.php
+if (session_status() === PHP_SESSION_NONE) {
     session_set_cookie_params([
         'lifetime' => 86400 * 30,
         'path' => '/',
@@ -48,27 +25,18 @@ function initializeSession() {
         'httponly' => true,
         'samesite' => 'None'
     ]);
-    
-    // Use the session token from headers
-    session_id($sessionToken);
     session_start();
-    
-    return true;
 }
 
 /*********************************
- * AUTHENTICATION CHECK
+ * AUTHENTICATION CHECK - SIMPLIFIED
  *********************************/
 function checkAuthentication() {
-    // Try to initialize session
-    initializeSession();
-    
-    // Check if user is logged in (same as auth.php)
-    if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
-        return false;
+    // Simple check - same as auth.php
+    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
+        return $_SESSION['user_id'];
     }
-    
-    return $_SESSION['user_id'];
+    return null;
 }
 
 /*********************************
@@ -85,12 +53,19 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
 try {
     $method = $_SERVER['REQUEST_METHOD'];
 
+    // Check authentication first for all requests
+    $userId = checkAuthentication();
+    if (!$userId) {
+        ResponseHandler::error('Authentication required. Please login.', 401);
+    }
+
+    // Route authenticated requests
     if ($method === 'GET') {
-        handleGetRequest();
+        handleGetRequest($userId);
     } elseif ($method === 'POST') {
-        handlePostRequest();
+        handlePostRequest($userId);
     } elseif ($method === 'PUT') {
-        handlePutRequest();
+        handlePutRequest($userId);
     } else {
         ResponseHandler::error('Method not allowed', 405);
     }
@@ -101,17 +76,10 @@ try {
 /*********************************
  * GET REQUESTS
  *********************************/
-function handleGetRequest() {
+function handleGetRequest($userId) {
     $db = new Database();
     $conn = $db->getConnection();
-
-    // Check authentication
-    $userId = checkAuthentication();
-    if (!$userId) {
-        ResponseHandler::error('Authentication required. Please login.', 401);
-    }
     
-    // Check if fetching specific order
     $orderId = $_GET['id'] ?? null;
     
     if ($orderId) {
@@ -359,15 +327,9 @@ function getOrderDetails($conn, $orderId, $userId) {
 /*********************************
  * POST REQUESTS
  *********************************/
-function handlePostRequest() {
+function handlePostRequest($userId) {
     $db = new Database();
     $conn = $db->getConnection();
-
-    // Check authentication
-    $userId = checkAuthentication();
-    if (!$userId) {
-        ResponseHandler::error('Authentication required. Please login.', 401);
-    }
     
     $input = json_decode(file_get_contents('php://input'), true);
     if (!$input) {
@@ -906,15 +868,9 @@ function trackOrder($conn, $data, $userId) {
 /*********************************
  * PUT REQUESTS
  *********************************/
-function handlePutRequest() {
+function handlePutRequest($userId) {
     $db = new Database();
     $conn = $db->getConnection();
-
-    // Check authentication
-    $userId = checkAuthentication();
-    if (!$userId) {
-        ResponseHandler::error('Authentication required. Please login.', 401);
-    }
     
     $input = json_decode(file_get_contents('php://input'), true);
     if (!$input) {
