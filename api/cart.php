@@ -1281,7 +1281,7 @@ function formatCartItemData($item, $baseUrl) {
         if (strpos($item['item_image'], 'http') === 0) {
             $itemImage = $item['item_image'];
         } else {
-            $itemImage = rtrim($baseUrl, '/') . '/uploads/menu_items/' . $item['item_image'];
+            $itemImage = rtrim($baseUrl, '/') . '/uploads/' . $item['item_image'];
         }
     }
     
@@ -1290,7 +1290,7 @@ function formatCartItemData($item, $baseUrl) {
         if (strpos($item['merchant_image'], 'http') === 0) {
             $merchantImage = $item['merchant_image'];
         } else {
-            $merchantImage = rtrim($baseUrl, '/') . '/uploads/merchants/' . $item['merchant_image'];
+            $merchantImage = rtrim($baseUrl, '/') . '/uploads/' . $item['merchant_image'];
         }
     }
     
