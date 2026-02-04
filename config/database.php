@@ -1,10 +1,10 @@
 <?php
 class Database {
-    private $host     = 'shortline.proxy.rlwy.net';  // Railway MySQL host
-    private $port     = '48935';                     // Railway MySQL port
-    private $db_name  = 'railway';                  // Railway database name
-    private $username = 'root';                     // Railway username
-    private $password = 'zRmsMDcjRRrOIxvLmrPoaqGkKABEQxNO'; // Railway password
+    private $host     = 'hopper.proxy.rlwy.net';  // Railway MySQL public host
+    private $port     = '37295';                   // Railway MySQL public port
+    private $db_name  = 'railway';                 // Railway database name
+    private $username = 'root';                    // Railway username
+    private $password = 'mOewPxIZVaXjRmryXRHPHQzLvYrdXEQo'; // Railway password
     public $conn;
 
     public function getConnection() {
