@@ -49,8 +49,59 @@ function getBaseUrl() {
     return $baseUrl;
 }
 
+<?php
 /*********************************
- * ROUTER - SIMPLIFIED VERSION
+ * CORS Configuration
+ *********************************/
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Credentials: true");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
+header("Content-Type: application/json; charset=UTF-8");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+/*********************************
+ * SESSION CONFIG
+ *********************************/
+if (session_status() === PHP_SESSION_NONE) {
+    session_set_cookie_params([
+        'lifetime' => 86400 * 30,
+        'path' => '/',
+        'domain' => '',
+        'secure' => true,
+        'httponly' => true,
+        'samesite' => 'None'
+    ]);
+    session_start();
+}
+
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../includes/ResponseHandler.php';
+
+/*********************************
+ * BASE URL CONFIGURATION
+ *********************************/
+$baseUrl = "https://dropx-production-6373.up.railway.app";
+
+/*********************************
+ * INITIALIZATION & HELPER FUNCTIONS
+ *********************************/
+function initDatabase() {
+    $db = new Database();
+    return $db->getConnection();
+}
+
+function getBaseUrl() {
+    global $baseUrl;
+    return $baseUrl;
+}
+
+/*********************************
+ * ROUTER - FIXED PATH PARSING
  *********************************/
 try {
     $method = $_SERVER['REQUEST_METHOD'];
@@ -60,14 +111,35 @@ try {
     // Parse query parameters
     parse_str($queryString ?? '', $queryParams);
     
-    // Remove .php extension if present
-    $path = str_replace('.php', '', $path);
-    $pathParts = explode('/', trim($path, '/'));
+    // Debug: Log the full path
+    error_log("FULL PATH: " . $path);
+    error_log("SCRIPT_NAME: " . $_SERVER['SCRIPT_NAME']);
     
-    error_log("DEBUG - Path: " . $path);
-    error_log("DEBUG - Path Parts: " . json_encode($pathParts));
-    error_log("DEBUG - Method: " . $method);
-    error_log("DEBUG - Full URI: " . $_SERVER['REQUEST_URI']);
+    // Remove the script name (merchants.php) from the path
+    $scriptName = basename($_SERVER['SCRIPT_NAME']); // merchants.php
+    $basePath = dirname($_SERVER['SCRIPT_NAME']); // directory containing merchants.php
+    
+    // Extract the path after the script name
+    if (strpos($path, $scriptName) !== false) {
+        // Path contains merchants.php
+        $relativePath = substr($path, strpos($path, $scriptName) + strlen($scriptName));
+        $pathParts = explode('/', trim($relativePath, '/'));
+    } else {
+        // Path doesn't contain script name
+        $pathParts = explode('/', trim($path, '/'));
+    }
+    
+    // Remove empty parts
+    $pathParts = array_filter($pathParts, function($part) {
+        return $part !== '';
+    });
+    
+    // Re-index array
+    $pathParts = array_values($pathParts);
+    
+    error_log("PATH PARTS: " . json_encode($pathParts));
+    error_log("METHOD: " . $method);
+    error_log("FULL URI: " . $_SERVER['REQUEST_URI']);
     
     // Initialize database connection
     $conn = initDatabase();
@@ -75,44 +147,47 @@ try {
     
     // Route the request
     if ($method === 'GET') {
-        // Handle merchants list
-        if (empty($pathParts) || $pathParts[0] === 'merchants' && count($pathParts) === 1) {
+        // If no path parts, it's /merchants.php
+        if (empty($pathParts)) {
             getMerchantsList($conn, $baseUrl);
             exit();
         }
         
-        // Handle merchant details
-        if ($pathParts[0] === 'merchants' && count($pathParts) === 2 && is_numeric($pathParts[1])) {
-            $merchantId = intval($pathParts[1]);
-            getMerchantDetails($conn, $merchantId, $baseUrl);
-            exit();
+        // If first part is a number, it's /merchants.php/{id}
+        if (is_numeric($pathParts[0])) {
+            $merchantId = intval($pathParts[0]);
+            
+            // If there's a second part, it's an action like /merchants.php/{id}/menu
+            if (isset($pathParts[1])) {
+                $action = $pathParts[1];
+                
+                switch ($action) {
+                    case 'menu':
+                        $includeQuickOrders = isset($queryParams['include_quick_orders']) 
+                            ? filter_var($queryParams['include_quick_orders'], FILTER_VALIDATE_BOOLEAN)
+                            : true;
+                        getMerchantMenu($conn, $merchantId, $baseUrl, $includeQuickOrders);
+                        exit();
+                        
+                    case 'categories':
+                        getMerchantCategories($conn, $merchantId, $baseUrl);
+                        exit();
+                        
+                    case 'quick-orders':
+                        getMerchantQuickOrders($conn, $merchantId, $baseUrl);
+                        exit();
+                        
+                    default:
+                        ResponseHandler::error('Invalid action specified', 400);
+                }
+            } else {
+                // No action, just merchant details: /merchants.php/{id}
+                getMerchantDetails($conn, $merchantId, $baseUrl);
+                exit();
+            }
         }
         
-        // Handle merchant menu
-        if ($pathParts[0] === 'merchants' && count($pathParts) === 3 && is_numeric($pathParts[1]) && $pathParts[2] === 'menu') {
-            $merchantId = intval($pathParts[1]);
-            $includeQuickOrders = isset($queryParams['include_quick_orders']) 
-                ? filter_var($queryParams['include_quick_orders'], FILTER_VALIDATE_BOOLEAN)
-                : true;
-            getMerchantMenu($conn, $merchantId, $baseUrl, $includeQuickOrders);
-            exit();
-        }
-        
-        // Handle merchant categories
-        if ($pathParts[0] === 'merchants' && count($pathParts) === 3 && is_numeric($pathParts[1]) && $pathParts[2] === 'categories') {
-            $merchantId = intval($pathParts[1]);
-            getMerchantCategories($conn, $merchantId, $baseUrl);
-            exit();
-        }
-        
-        // Handle merchant quick-orders
-        if ($pathParts[0] === 'merchants' && count($pathParts) === 3 && is_numeric($pathParts[1]) && $pathParts[2] === 'quick-orders') {
-            $merchantId = intval($pathParts[1]);
-            getMerchantQuickOrders($conn, $merchantId, $baseUrl);
-            exit();
-        }
-        
-        // If no route matched, return 404
+        // If we get here, no route matched
         ResponseHandler::error('Endpoint not found', 404);
         
     } elseif ($method === 'POST') {
