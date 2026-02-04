@@ -49,57 +49,6 @@ function getBaseUrl() {
     return $baseUrl;
 }
 
-<?php
-/*********************************
- * CORS Configuration
- *********************************/
-header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Credentials: true");
-header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
-header("Content-Type: application/json; charset=UTF-8");
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
-
-/*********************************
- * SESSION CONFIG
- *********************************/
-if (session_status() === PHP_SESSION_NONE) {
-    session_set_cookie_params([
-        'lifetime' => 86400 * 30,
-        'path' => '/',
-        'domain' => '',
-        'secure' => true,
-        'httponly' => true,
-        'samesite' => 'None'
-    ]);
-    session_start();
-}
-
-require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/../includes/ResponseHandler.php';
-
-/*********************************
- * BASE URL CONFIGURATION
- *********************************/
-$baseUrl = "https://dropx-production-6373.up.railway.app";
-
-/*********************************
- * INITIALIZATION & HELPER FUNCTIONS
- *********************************/
-function initDatabase() {
-    $db = new Database();
-    return $db->getConnection();
-}
-
-function getBaseUrl() {
-    global $baseUrl;
-    return $baseUrl;
-}
-
 /*********************************
  * ROUTER - FIXED PATH PARSING
  *********************************/
