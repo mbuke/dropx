@@ -10,12 +10,8 @@ $baseUrl = "https://dropx-production-6373.up.railway.app";
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Credentials: true");
 header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-Session-Token, X-Device-ID, X-Platform, X-App-Version");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept");
 header("Content-Type: application/json; charset=UTF-8");
-
-// Enable error reporting for debugging
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -23,7 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 /*********************************
- * SESSION CONFIG - MATCHING AUTH.PHP
+ * SESSION CONFIG
  *********************************/
 if (session_status() === PHP_SESSION_NONE) {
     session_set_cookie_params([
@@ -41,30 +37,9 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/ResponseHandler.php';
 
 /*********************************
- * AUTHENTICATION HELPER
- *********************************/
-function checkAuthentication($conn) {
-    // PRIMARY: Check PHP Session (matches auth.php logic)
-    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
-        return $_SESSION['user_id'];
-    }
-    
-    return false;
-}
-
-/*********************************
  * ROUTER
  *********************************/
 try {
-    $method = $_SERVER['REQUEST_METHOD'];
-    
-    // Get input data
-    $input = json_decode(file_get_contents('php://input'), true);
-    if (!$input && $_SERVER['REQUEST_METHOD'] === 'POST') {
-        $input = $_POST;
-    }
-
-    // Check database connection first
     $db = new Database();
     $conn = $db->getConnection();
     
@@ -72,13 +47,20 @@ try {
         ResponseHandler::error('Database connection failed', 500);
     }
 
-    // ALL notification requests require authentication
-    $userId = checkAuthentication($conn);
-    if (!$userId) {
+    // Check authentication
+    if (empty($_SESSION['user_id']) || empty($_SESSION['logged_in'])) {
         ResponseHandler::error('Authentication required. Please login.', 401);
     }
+    
+    $userId = $_SESSION['user_id'];
 
-    // Route authenticated requests
+    $method = $_SERVER['REQUEST_METHOD'];
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    if (!$input && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $input = $_POST;
+    }
+
     if ($method === 'GET') {
         handleGetRequest($conn, $userId);
     } elseif ($method === 'POST') {
@@ -363,9 +345,6 @@ function handlePostRequest($conn, $userId, $input) {
         case 'update_preferences':
             updateNotificationPreferences($conn, $userId, $input);
             break;
-        case 'debug_auth':
-            debugAuth($conn);
-            break;
         default:
             ResponseHandler::error('Invalid action: ' . $action, 400);
     }
@@ -395,25 +374,6 @@ function handleDeleteRequest($conn, $userId, $input) {
     }
 
     deleteNotification($conn, $userId, $notificationId);
-}
-
-/*********************************
- * DEBUG AUTH ENDPOINT
- *********************************/
-function debugAuth($conn) {
-    ResponseHandler::success([
-        'success' => true,
-        'data' => [
-            'base_url' => $GLOBALS['baseUrl'],
-            'session_id' => session_id(),
-            'session_user_id' => $_SESSION['user_id'] ?? null,
-            'session_logged_in' => $_SESSION['logged_in'] ?? null,
-            'session_status' => session_status(),
-            'all_headers' => getallheaders(),
-            'all_cookies' => $_COOKIE,
-            'session_data' => $_SESSION
-        ]
-    ]);
 }
 
 /*********************************
