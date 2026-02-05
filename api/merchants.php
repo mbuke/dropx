@@ -54,99 +54,70 @@ function getBaseUrl() {
  *********************************/
 try {
     $method = $_SERVER['REQUEST_METHOD'];
-    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-    $queryString = parse_url($_SERVER['REQUEST_URI'], PHP_URL_QUERY);
+    $requestUri = $_SERVER['REQUEST_URI'];
+    
+    // Remove query string if present
+    $path = parse_url($requestUri, PHP_URL_PATH);
+    $queryString = parse_url($requestUri, PHP_URL_QUERY);
     
     // Parse query parameters
     parse_str($queryString ?? '', $queryParams);
     
-    // Debug: Log the full path
-    error_log("FULL PATH: " . $path);
-    error_log("SCRIPT_NAME: " . $_SERVER['SCRIPT_NAME']);
+    error_log("=== ROUTER DEBUG ===");
+    error_log("Full URI: " . $requestUri);
+    error_log("Path: " . $path);
+    error_log("Query String: " . ($queryString ?: 'none'));
+    error_log("Method: " . $method);
     
-    // Remove the script name (merchants.php) from the path
-    $scriptName = basename($_SERVER['SCRIPT_NAME']); // merchants.php
-    $basePath = dirname($_SERVER['SCRIPT_NAME']); // directory containing merchants.php
-    
-    // Extract the path after the script name
-    if (strpos($path, $scriptName) !== false) {
-        // Path contains merchants.php
-        $relativePath = substr($path, strpos($path, $scriptName) + strlen($scriptName));
-        $pathParts = explode('/', trim($relativePath, '/'));
-    } else {
-        // Path doesn't contain script name
-        $pathParts = explode('/', trim($path, '/'));
-    }
-    
-    // Remove empty parts
-    $pathParts = array_filter($pathParts, function($part) {
-        return $part !== '';
-    });
-    
-    // Re-index array
-    $pathParts = array_values($pathParts);
-    
-    error_log("PATH PARTS: " . json_encode($pathParts));
-    error_log("METHOD: " . $method);
-    error_log("FULL URI: " . $_SERVER['REQUEST_URI']);
-    
-    // Initialize database connection
+    // Initialize database
     $conn = initDatabase();
     $baseUrl = getBaseUrl();
     
-    // Route the request
-    if ($method === 'GET') {
-        // If no path parts, it's /merchants.php
-        if (empty($pathParts)) {
-            getMerchantsList($conn, $baseUrl);
-            exit();
-        }
-        
-        // If first part is a number, it's /merchants.php/{id}
-        if (is_numeric($pathParts[0])) {
-            $merchantId = intval($pathParts[0]);
-            
-            // If there's a second part, it's an action like /merchants.php/{id}/menu
-            if (isset($pathParts[1])) {
-                $action = $pathParts[1];
-                
-                switch ($action) {
-                    case 'menu':
-                        $includeQuickOrders = isset($queryParams['include_quick_orders']) 
-                            ? filter_var($queryParams['include_quick_orders'], FILTER_VALIDATE_BOOLEAN)
-                            : true;
-                        getMerchantMenu($conn, $merchantId, $baseUrl, $includeQuickOrders);
-                        exit();
-                        
-                    case 'categories':
-                        getMerchantCategories($conn, $merchantId, $baseUrl);
-                        exit();
-                        
-                    case 'quick-orders':
-                        getMerchantQuickOrders($conn, $merchantId, $baseUrl);
-                        exit();
-                        
-                    default:
-                        ResponseHandler::error('Invalid action specified', 400);
-                }
-            } else {
-                // No action, just merchant details: /merchants.php/{id}
-                getMerchantDetails($conn, $merchantId, $baseUrl);
-                exit();
-            }
-        }
-        
-        // If we get here, no route matched
-        ResponseHandler::error('Endpoint not found', 404);
-        
-    } elseif ($method === 'POST') {
-        handlePostRequest();
-    } else {
-        ResponseHandler::error('Method not allowed', 405);
+    if (!$conn) {
+        ResponseHandler::error('Database connection failed', 500);
     }
     
+    // === FIXED ROUTING LOGIC ===
+    
+    // Handle /merchants.php/3/menu
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)/menu$#', $path, $matches)) {
+        error_log("Matched menu endpoint for merchant ID: " . $matches[1]);
+        $merchantId = intval($matches[1]);
+        $includeQuickOrders = isset($queryParams['include_quick_orders']) 
+            ? filter_var($queryParams['include_quick_orders'], FILTER_VALIDATE_BOOLEAN)
+            : true;
+        getMerchantMenu($conn, $merchantId, $baseUrl, $includeQuickOrders);
+        exit();
+    }
+    
+    // Handle /merchants.php/3 (merchant details)
+    if ($method === 'GET' && preg_match('#/merchants\.php/(\d+)$#', $path, $matches)) {
+        error_log("Matched merchant details endpoint for ID: " . $matches[1]);
+        $merchantId = intval($matches[1]);
+        getMerchantDetails($conn, $merchantId, $baseUrl);
+        exit();
+    }
+    
+    // Handle /merchants.php (merchants list)
+    if ($method === 'GET' && preg_match('#/merchants\.php$#', $path)) {
+        error_log("Matched merchants list endpoint");
+        getMerchantsList($conn, $baseUrl);
+        exit();
+    }
+    
+    // Handle POST requests to merchants.php
+    if ($method === 'POST' && preg_match('#/merchants\.php$#', $path)) {
+        error_log("Matched POST endpoint");
+        handlePostRequest();
+        exit();
+    }
+    
+    // If no route matches
+    error_log("No route matched for path: " . $path);
+    ResponseHandler::error('Endpoint not found: ' . $path, 404);
+    
 } catch (Exception $e) {
-    error_log("Router Error: " . $e->getMessage() . "\n" . $e->getTraceAsString());
+    error_log("Router Error: " . $e->getMessage());
     ResponseHandler::error('Server error: ' . $e->getMessage(), 500);
 }
 
