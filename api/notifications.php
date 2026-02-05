@@ -1,5 +1,10 @@
 <?php
 /*********************************
+ * BASE URL CONFIGURATION
+ *********************************/
+$baseUrl = "https://dropx-production-6373.up.railway.app";
+
+/*********************************
  * CORS Configuration
  *********************************/
 header("Access-Control-Allow-Origin: *");
@@ -18,16 +23,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 /*********************************
- * SESSION CONFIG - MATCHING FLUTTER
+ * SESSION CONFIG - MATCHING AUTH.PHP
  *********************************/
 if (session_status() === PHP_SESSION_NONE) {
     session_set_cookie_params([
-        'lifetime' => 86400 * 30, // 30 days - matches Flutter
+        'lifetime' => 86400 * 30,
         'path' => '/',
         'domain' => '',
-        'secure' => isset($_SERVER['HTTPS']), // Auto-detect for Railway
+        'secure' => true,
         'httponly' => true,
-        'samesite' => 'Lax' // Better compatibility
+        'samesite' => 'None'
     ]);
     session_start();
 }
@@ -39,87 +44,11 @@ require_once __DIR__ . '/../includes/ResponseHandler.php';
  * AUTHENTICATION HELPER
  *********************************/
 function checkAuthentication($conn) {
-    // Start by logging current auth state for debugging
-    error_log("=== NOTIFICATIONS AUTH CHECK ===");
-    error_log("Session ID: " . session_id());
-    
-    // 1. PRIMARY: Check PHP Session (Flutter sends cookies)
-    if (!empty($_SESSION['user_id'])) {
-        error_log("Auth Method: PHP Session - User ID: " . $_SESSION['user_id']);
+    // PRIMARY: Check PHP Session (matches auth.php logic)
+    if (!empty($_SESSION['user_id']) && !empty($_SESSION['logged_in'])) {
         return $_SESSION['user_id'];
     }
     
-    // 2. SECONDARY: Check Authorization Bearer Token
-    $headers = getallheaders();
-    $authHeader = $headers['Authorization'] ?? $headers['authorization'] ?? '';
-    
-    if (strpos($authHeader, 'Bearer ') === 0) {
-        $token = substr($authHeader, 7);
-        error_log("Auth Method: Bearer Token");
-        
-        // Check in users table for API token
-        $stmt = $conn->prepare(
-            "SELECT id FROM users WHERE api_token = :token AND api_token_expiry > NOW()"
-        );
-        $stmt->execute([':token' => $token]);
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($user) {
-            $_SESSION['user_id'] = $user['id'];
-            error_log("Bearer Token Valid - User ID: " . $user['id']);
-            return $user['id'];
-        }
-    }
-    
-    // 3. TERTIARY: Check X-Session-Token header (Flutter custom header)
-    $sessionToken = $headers['X-Session-Token'] ?? '';
-    if ($sessionToken) {
-        error_log("Auth Method: X-Session-Token");
-        
-        // Try to validate session token
-        $stmt = $conn->prepare(
-            "SELECT user_id FROM user_sessions 
-             WHERE session_token = :token AND expires_at > NOW()"
-        );
-        $stmt->execute([':token' => $sessionToken]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($result) {
-            $_SESSION['user_id'] = $result['user_id'];
-            error_log("Session Token Valid - User ID: " . $result['user_id']);
-            return $result['user_id'];
-        }
-        
-        // Fallback: check if it's the PHP session token
-        if (session_id() !== $sessionToken) {
-            // Try to restore session from token
-            session_id($sessionToken);
-            session_start();
-            
-            if (!empty($_SESSION['user_id'])) {
-                error_log("Session Restored from Token - User ID: " . $_SESSION['user_id']);
-                return $_SESSION['user_id'];
-            }
-        }
-    }
-    
-    // 4. FALLBACK: Check for PHPSESSID cookie directly
-    if (!empty($_COOKIE['PHPSESSID'])) {
-        error_log("Auth Method: PHPSESSID Cookie");
-        
-        if (session_id() !== $_COOKIE['PHPSESSID']) {
-            // Restart session with cookie ID
-            session_id($_COOKIE['PHPSESSID']);
-            session_start();
-            
-            if (!empty($_SESSION['user_id'])) {
-                error_log("Session Restored from Cookie - User ID: " . $_SESSION['user_id']);
-                return $_SESSION['user_id'];
-            }
-        }
-    }
-    
-    error_log("=== AUTH CHECK FAILED ===");
     return false;
 }
 
@@ -472,16 +401,15 @@ function handleDeleteRequest($conn, $userId, $input) {
  * DEBUG AUTH ENDPOINT
  *********************************/
 function debugAuth($conn) {
-    $headers = getallheaders();
-    
     ResponseHandler::success([
         'success' => true,
         'data' => [
+            'base_url' => $GLOBALS['baseUrl'],
             'session_id' => session_id(),
             'session_user_id' => $_SESSION['user_id'] ?? null,
+            'session_logged_in' => $_SESSION['logged_in'] ?? null,
             'session_status' => session_status(),
-            'session_name' => session_name(),
-            'all_headers' => $headers,
+            'all_headers' => getallheaders(),
             'all_cookies' => $_COOKIE,
             'session_data' => $_SESSION
         ]
