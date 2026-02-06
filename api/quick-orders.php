@@ -1255,7 +1255,7 @@ function formatQuickOrderDetailData($q, $baseUrl) {
         if (strpos($q['image_url'], 'http') === 0) {
             $imageUrl = $q['image_url'];
         } else {
-            $imageUrl = rtrim($baseUrl, '/') . '/uploads/quick-orders/' . $q['image_url'];
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/menu_items/' . $q['image_url'];
         }
     }
     
@@ -1307,7 +1307,7 @@ function formatQuickOrderItemData($item, $baseUrl) {
         if (strpos($item['image_url'], 'http') === 0) {
             $imageUrl = $item['image_url'];
         } else {
-            $imageUrl = rtrim($baseUrl, '/') . '/uploads/quick-order-items/' . $item['image_url'];
+            $imageUrl = rtrim($baseUrl, '/') . '/uploads/menu_items/' . $item['image_url'];
         }
     }
     
