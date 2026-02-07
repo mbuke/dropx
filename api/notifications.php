@@ -345,6 +345,9 @@ function handlePostRequest($conn, $userId, $input) {
         case 'update_preferences':
             updateNotificationPreferences($conn, $userId, $input);
             break;
+        case 'trigger_event': // ADDED: Support for trigger_event
+            handleTriggerEvent($conn, $userId, $input);
+            break;
         default:
             ResponseHandler::error('Invalid action: ' . $action, 400);
     }
@@ -630,6 +633,254 @@ function updateNotificationPreferences($conn, $userId, $data) {
         ],
         'message' => 'Notification preferences updated successfully'
     ]);
+}
+
+/*********************************
+ * HANDLE TRIGGER EVENT
+ *********************************/
+function handleTriggerEvent($conn, $userId, $input) {
+    $eventName = $input['event_name'] ?? '';
+    $eventData = $input['event_data'] ?? [];
+    
+    if (empty($eventName)) {
+        ResponseHandler::error('Event name is required', 400);
+    }
+    
+    // Log the event to user_events table if it exists
+    try {
+        // Check if user_events table exists
+        $tableCheck = $conn->query("SHOW TABLES LIKE 'user_events'");
+        if ($tableCheck && $tableCheck->rowCount() > 0) {
+            $stmt = $conn->prepare(
+                "INSERT INTO user_events (user_id, event_name, event_data, created_at)
+                 VALUES (:user_id, :event_name, :event_data, NOW())"
+            );
+            
+            $stmt->execute([
+                ':user_id' => $userId,
+                ':event_name' => $eventName,
+                ':event_data' => json_encode($eventData)
+            ]);
+        }
+    } catch (Exception $e) {
+        // If table doesn't exist, just log to error log
+        error_log("Failed to log event to user_events: " . $e->getMessage());
+    }
+    
+    // Create notification based on event type
+    $notificationCreated = createNotificationForEvent($conn, $userId, $eventName, $eventData);
+    
+    ResponseHandler::success([
+        'success' => true,
+        'data' => [
+            'event_logged' => true,
+            'notification_created' => $notificationCreated,
+            'event_name' => $eventName
+        ],
+        'message' => 'Event logged successfully'
+    ]);
+}
+
+/*********************************
+ * CREATE NOTIFICATION FOR EVENT
+ *********************************/
+function createNotificationForEvent($conn, $userId, $eventName, $eventData) {
+    $notificationConfig = getNotificationConfigForEvent($eventName, $eventData);
+    
+    if (!$notificationConfig['should_create']) {
+        return false;
+    }
+    
+    try {
+        $stmt = $conn->prepare(
+            "INSERT INTO notifications 
+                (user_id, type, title, message, data, sent_via, sent_at, created_at)
+             VALUES (:user_id, :type, :title, :message, :data, :sent_via, NOW(), NOW())"
+        );
+        
+        $result = $stmt->execute([
+            ':user_id' => $userId,
+            ':type' => $notificationConfig['type'],
+            ':title' => $notificationConfig['title'],
+            ':message' => $notificationConfig['message'],
+            ':data' => json_encode(array_merge($eventData, ['event_name' => $eventName])),
+            ':sent_via' => 'in_app'
+        ]);
+        
+        return $result;
+    } catch (Exception $e) {
+        error_log("Failed to create notification for event: " . $e->getMessage());
+        return false;
+    }
+}
+
+/*********************************
+ * GET NOTIFICATION CONFIG FOR EVENT
+ *********************************/
+function getNotificationConfigForEvent($eventName, $eventData) {
+    $defaultConfig = [
+        'should_create' => false,
+        'type' => 'system',
+        'title' => '',
+        'message' => ''
+    ];
+    
+    switch ($eventName) {
+        case 'user_created':
+            return [
+                'should_create' => true,
+                'type' => 'system',
+                'title' => 'Welcome to DropX! 🎉',
+                'message' => 'Thank you for joining DropX. Get started by exploring our restaurants.'
+            ];
+            
+        case 'user_logged_in':
+            // Don't create notification for every login
+            return $defaultConfig;
+            
+        case 'order_created':
+            $orderNumber = $eventData['order_number'] ?? '';
+            return [
+                'should_create' => true,
+                'type' => 'order',
+                'title' => 'Order Confirmed! ✅',
+                'message' => "Your order #$orderNumber has been placed successfully."
+            ];
+            
+        case 'order_status_changed':
+            $newStatus = $eventData['new_status'] ?? '';
+            $orderId = $eventData['order_id'] ?? '';
+            $statusMessages = [
+                'pending' => 'is being processed',
+                'confirmed' => 'has been confirmed',
+                'preparing' => 'is being prepared',
+                'ready' => 'is ready for pickup/delivery',
+                'delivered' => 'has been delivered',
+                'cancelled' => 'has been cancelled'
+            ];
+            
+            $message = "Your order #$orderId " . ($statusMessages[$newStatus] ?? "status changed to $newStatus");
+            
+            return [
+                'should_create' => true,
+                'type' => 'order',
+                'title' => 'Order Status Updated',
+                'message' => $message
+            ];
+            
+        case 'payment_success':
+            $amount = $eventData['amount'] ?? 0;
+            $orderId = $eventData['order_id'] ?? '';
+            return [
+                'should_create' => true,
+                'type' => 'payment',
+                'title' => 'Payment Successful! 💳',
+                'message' => "Payment of ₹$amount for order #$orderId was successful."
+            ];
+            
+        case 'delivery_assigned':
+            $driverName = $eventData['driver_name'] ?? 'driver';
+            return [
+                'should_create' => true,
+                'type' => 'delivery',
+                'title' => 'Delivery Partner Assigned',
+                'message' => "$driverName will be delivering your order."
+            ];
+            
+        case 'order_delivered':
+            return [
+                'should_create' => true,
+                'type' => 'delivery',
+                'title' => 'Order Delivered! 🎊',
+                'message' => 'Your order has been delivered. Enjoy your meal!'
+            ];
+            
+        case 'promotion_applied':
+            $promoCode = $eventData['promo_code'] ?? '';
+            $discount = $eventData['discount_amount'] ?? 0;
+            return [
+                'should_create' => true,
+                'type' => 'promotion',
+                'title' => 'Promotion Applied! 🎁',
+                'message' => "Promo code '$promoCode' applied. You saved ₹$discount!"
+            ];
+            
+        case 'review_added':
+            $targetType = $eventData['target_type'] ?? '';
+            $rating = $eventData['rating'] ?? 0;
+            
+            $messages = [
+                'merchant' => "Thanks for rating a restaurant {$rating}⭐",
+                'order' => "Thanks for rating your order {$rating}⭐",
+                'driver' => "Thanks for rating your delivery {$rating}⭐"
+            ];
+            
+            return [
+                'should_create' => true,
+                'type' => 'update',
+                'title' => 'Review Submitted',
+                'message' => $messages[$targetType] ?? "Thanks for your {$rating}⭐ review!"
+            ];
+            
+        case 'cart_threshold':
+            $cartTotal = $eventData['cart_total'] ?? 0;
+            $eventType = $eventData['event'] ?? 'cart_reminder';
+            
+            if ($eventType === 'free_delivery_eligible') {
+                return [
+                    'should_create' => true,
+                    'type' => 'promotion',
+                    'title' => 'Free Delivery! 🚚',
+                    'message' => 'Your cart qualifies for free delivery!'
+                ];
+            } else {
+                return [
+                    'should_create' => true,
+                    'type' => 'promotion',
+                    'title' => 'Cart Reminder',
+                    'message' => "Your cart total is ₹$cartTotal. Add more items to qualify for free delivery!"
+                ];
+            }
+            
+        case 'address_added':
+            return [
+                'should_create' => true,
+                'type' => 'update',
+                'title' => 'Address Saved',
+                'message' => 'Your new address has been saved successfully.'
+            ];
+            
+        case 'profile_updated':
+            return [
+                'should_create' => true,
+                'type' => 'update',
+                'title' => 'Profile Updated',
+                'message' => 'Your profile has been updated successfully.'
+            ];
+            
+        case 'merchant_favorite':
+            $isFavorite = $eventData['is_favorite'] ?? false;
+            return [
+                'should_create' => true,
+                'type' => 'update',
+                'title' => $isFavorite ? 'Added to Favorites' : 'Removed from Favorites',
+                'message' => $isFavorite 
+                    ? 'Restaurant added to your favorites!' 
+                    : 'Restaurant removed from your favorites.'
+            ];
+            
+        case 'quick_order_created':
+            $orderNumber = $eventData['order_number'] ?? '';
+            return [
+                'should_create' => true,
+                'type' => 'order',
+                'title' => 'Quick Order Confirmed! ⚡',
+                'message' => "Your quick order #$orderNumber has been placed successfully."
+            ];
+            
+        default:
+            return $defaultConfig;
+    }
 }
 
 /*********************************
