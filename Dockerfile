@@ -8,8 +8,8 @@ RUN docker-php-ext-install pdo pdo_mysql
 COPY . /app
 WORKDIR /app
 
-# Expose port 8080
+# Expose port (Railway will use $PORT env var)
 EXPOSE 8080
 
-# Start PHP built-in server on port 8080
-CMD php -S 0.0.0.0:8080 -t .
+# Use ENTRYPOINT instead of CMD for Railway compatibility
+ENTRYPOINT ["php", "-S", "0.0.0.0:${PORT:-8080}", "-t", "."]
