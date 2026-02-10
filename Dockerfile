@@ -4,12 +4,12 @@ FROM php:8.4-cli
 # Install PDO MySQL
 RUN docker-php-ext-install pdo pdo_mysql
 
+# Copy your app
 COPY . /app
-WORKDIR /app 
+WORKDIR /app
 
-RUN echo '#!/bin/sh' > /docker-entrypoint.sh && \
-    echo 'exec php -S 0.0.0.0:${PORT:-8080} -t .' >> /docker-entrypoint.sh && \
-    chmod +x /docker-entrypoint.sh
+# Expose port 8080
+EXPOSE 8080
 
-# Use the entrypoint (note the exact path)
-ENTRYPOINT ["/docker-entrypoint.sh"]
+# Start PHP built-in server on port 8080
+CMD php -S 0.0.0.0:8080 -t .
